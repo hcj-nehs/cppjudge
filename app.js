@@ -406,7 +406,7 @@ window.addEventListener('hashchange', router);
 function viewLogin() {
   if (S) { location.hash = '#/problems'; return; }
   app().innerHTML = `<div class="login-wrap"><div class="card" style="text-align:center">
-    <h1>NEHS C++ Judge</h1><div class="muted">國中三年級資訊科技 · C++ 線上解題系統</div>
+    <h1>NEHS C++ Judge</h1><div class="muted">資訊科技 · C++ 線上解題系統</div>
     <div class="series-intro">${SERIES_KEYS.map(k => `<div><b>${esc(DATA.series[k].name)}</b><span>${PROBS.filter(p => p.series === k).length} 題</span></div>`).join('')}</div>
     <p style="margin:20px 0 12px">請使用<b>學校的 Google 帳號</b>登入${CFG.DOMAIN ? `<br><span class="muted small">（@${esc(CFG.DOMAIN)}）</span>` : ''}</p>
     <div id="gbtn" style="display:flex;justify-content:center;min-height:44px"><span class="muted">Google 登入按鈕載入中…</span></div>
