@@ -67,16 +67,31 @@ const isHidden = p => { const h = hiddenSet(); return h.has(p.id) || h.has(p.ser
 const visibleProbs = () => isTeacher() ? PROBS : PROBS.filter(p => !isHidden(p));
 
 // ============ 後端 ============
+// Google Apps Script 偶爾會暫時回傳錯誤網頁（不是 JSON），讀取類的請求會自動重試；
+// 「送出評測」「留言」不自動重試，避免重複送出。
+const NO_RETRY = /^\/api\/(submit|submissions\/\d+\/comments)$/;
 async function api(path, body, opt = {}) {
-  let r;
-  try {
-    r = await fetch(CFG.API_URL, {
-      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, redirect: 'follow',
-      body: JSON.stringify({ method: opt.method || 'POST', path, query: opt.query || {}, body: body || null, token: S && S.token }),
-    });
-  } catch (e) { throw new Error('無法連線到後端（請檢查網路，或 config.js 的 API_URL）'); }
-  let data = {};
-  try { data = await r.json(); } catch { throw new Error('後端回應格式錯誤，請確認 Apps Script 已正確部署'); }
+  const tries = NO_RETRY.test(path) ? 1 : 3;
+  let data = null, lastErr = '';
+  for (let i = 0; i < tries && !data; i++) {
+    if (i) await new Promise(r => setTimeout(r, 1000 * i));
+    let text;
+    try {
+      const r = await fetch(CFG.API_URL, {
+        method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, redirect: 'follow',
+        body: JSON.stringify({ method: opt.method || 'POST', path, query: opt.query || {}, body: body || null, token: S && S.token }),
+      });
+      text = await r.text();
+    } catch (e) { lastErr = '無法連線到後端，請檢查網路後再試一次'; continue; }
+    try { data = JSON.parse(text); }
+    catch {
+      console.warn('後端回應不是 JSON：', path, text.slice(0, 500));
+      lastErr = path === '/api/submit'
+        ? 'Google 伺服器暫時沒有正確回應。你的程式可能已經送出，請到「我的紀錄」或按右上角 🔄 確認，沒有的話再送一次。'
+        : 'Google 伺服器暫時忙碌，請稍等幾秒再試一次';
+    }
+  }
+  if (!data) throw new Error(lastErr);
   if (data.status === 401 && path !== '/api/login') {
     S = null; store.del('cj-state'); location.hash = '#/login';
     throw new Error('登入已過期，請重新登入');
@@ -397,7 +412,11 @@ async function router() {
   if (!v) { location.hash = '#/problems'; return; }
   if (['scoreboard', 'admin'].includes(page) && !isTeacher()) { location.hash = '#/problems'; return; }
   try { await v(decodeURIComponent(arg)); }
-  catch (e) { app().innerHTML = `<div class="card"><div class="err">${esc(e.message)}</div></div>`; console.error(e); }
+  catch (e) {
+    app().innerHTML = `<div class="card"><div class="err">${esc(e.message)}</div><button class="btn primary" id="retryPage" style="margin-top:10px">↻ 重新載入</button></div>`;
+    $('#retryPage').onclick = router;
+    console.error(e);
+  }
   window.scrollTo(0, 0);
 }
 window.addEventListener('hashchange', router);
