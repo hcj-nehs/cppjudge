@@ -67,14 +67,13 @@ const isHidden = p => { const h = hiddenSet(); return h.has(p.id) || h.has(p.ser
 const visibleProbs = () => isTeacher() ? PROBS : PROBS.filter(p => !isHidden(p));
 
 // ============ 後端 ============
-// Google Apps Script 偶爾會暫時回傳錯誤網頁（不是 JSON），讀取類的請求會自動重試；
-// 「送出評測」「留言」不自動重試，避免重複送出。
+// Google 偶爾會把 POST 轉址成 GET，後端只會回「API 運作中」而沒有處理請求——這種情況一定可以安全地重送。
+// 其他非 JSON 的錯誤網頁：讀取類的請求才重試；「送出評測」「留言」不自動重試，避免重複送出。
 const NO_RETRY = /^\/api\/(submit|submissions\/\d+\/comments)$/;
 async function api(path, body, opt = {}) {
-  const tries = NO_RETRY.test(path) ? 1 : 3;
   let data = null, lastErr = '';
-  for (let i = 0; i < tries && !data; i++) {
-    if (i) await new Promise(r => setTimeout(r, 1000 * i));
+  for (let i = 0; i < 4 && !data; i++) {
+    if (i) await new Promise(r => setTimeout(r, 700 * i));
     let text;
     try {
       const r = await fetch(CFG.API_URL, {
@@ -82,10 +81,12 @@ async function api(path, body, opt = {}) {
         body: JSON.stringify({ method: opt.method || 'POST', path, query: opt.query || {}, body: body || null, token: S && S.token }),
       });
       text = await r.text();
-    } catch (e) { lastErr = '無法連線到後端，請檢查網路後再試一次'; continue; }
+    } catch (e) { lastErr = '無法連線到後端，請檢查網路後再試一次'; if (NO_RETRY.test(path)) break; continue; }
     try { data = JSON.parse(text); }
     catch {
       console.warn('後端回應不是 JSON：', path, text.slice(0, 500));
+      if (/API 運作中/.test(text)) { lastErr = 'Google 伺服器暫時忙碌，請稍等幾秒再試一次'; continue; }   // 請求沒被處理，重送
+      if (NO_RETRY.test(path)) i = 99;
       lastErr = path === '/api/submit'
         ? 'Google 伺服器暫時沒有正確回應。你的程式可能已經送出，請到「我的紀錄」或按右上角 🔄 確認，沒有的話再送一次。'
         : 'Google 伺服器暫時忙碌，請稍等幾秒再試一次';
