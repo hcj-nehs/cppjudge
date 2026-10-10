@@ -19,6 +19,23 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch { } },
   json(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
 };
+// 系統管理員在網頁上新增／修改的題目：伺服器版本號改變時才下載，存在瀏覽器裡
+const BUILTIN = PROBS.slice();
+function applyCustom(list) {
+  PROBS.length = 0; PROBS.push(...BUILTIN);
+  for (const c of list || []) {
+    const i = PROBS.findIndex(p => p.id === c.id);
+    if (c.deleted) continue;
+    const p = Object.assign({ custom: true }, c);
+    if (i >= 0) PROBS[i] = p; else PROBS.push(p);
+  }
+  PROBS.sort((a, b) => a.id.localeCompare(b.id));
+  Object.keys(PMAP).forEach(k => delete PMAP[k]);
+  PROBS.forEach(p => PMAP[p.id] = p);
+  try { Judge.inputCache.clear(); } catch { }   // 程式剛啟動時 Judge 還沒建立
+}
+applyCustom((store.json('cj-custom', {}) || {}).list);
+const customPv = () => (store.json('cj-custom', {}) || {}).pv || '';
 let pageTimers = [];
 const clearPageTimers = () => { pageTimers.forEach(clearInterval); pageTimers = []; };
 function toast(msg, ms = 2600) {
@@ -46,19 +63,29 @@ async function sha(text) {
 // ============ 登入狀態（存在瀏覽器，重新整理不用再登入） ============
 let S = store.json('cj-state', null);
 const isTeacher = () => S && S.user && S.user.role === 'teacher';
+const isAdmin = () => isTeacher() && !!S.user.admin;
+const isGuest = () => S && S.user && S.user.role === 'guest';
 const saveState = () => { if (S) { trimSubs(); store.set('cj-state', JSON.stringify(S)); } };
 // 只保留最近 300 筆提交的程式碼，避免瀏覽器空間不夠
 function trimSubs() { (S.subs || []).forEach((s, i) => { if (i >= 300) delete s.code; }); }
+const toMine = c => Object.assign({}, c, { ac: !!c.firstAC });
+// 套用伺服器回傳的同步資料。資料沒有變動時伺服器只回 same:true，瀏覽器沿用已存的資料。
 function applySync(d) {
-  S.user = d.user; S.hidden = d.hidden || []; S.serverVersion = d.version; S.syncedAt = Date.now();
-  S.serverOffset = d.serverTime ? d.serverTime - Date.now() : 0;
-  if (isTeacher()) { S.classes = d.classes || []; S.notifs = d.notifs || []; }
+  S.user = d.user; S.serverVersion = d.version; S.syncedAt = Date.now(); S.schema = 2;
+  if (d.custom) { store.set('cj-custom', JSON.stringify({ pv: d.pv, list: d.custom })); applyCustom(d.custom); }
+  if (d.user.admin) S.pending = d.pending || 0;
+  if (d.user.role === 'guest') { S.teacherApply = d.teacherApply; S.googleName = d.googleName || S.googleName; }
+  else if (d.user.role === 'teacher') { S.classes = d.classes || []; S.notifs = d.notifs || []; S.hidden = []; }
   else {
-    S.mine = d.mine || {}; S.cls = d.cls || {}; S.ranks = d.ranks || {}; S.classmates = d.classmates || {}; S.comments = d.comments || [];
-    if (d.subs) {
-      const codes = Object.fromEntries((S.subs || []).filter(s => s.code).map(s => [s.id, s]));
-      S.subs = d.subs.map(s => Object.assign({}, codes[s.id] || {}, s)).sort((a, b) => b.id - a.id);
+    S.cid = d.cid; S.v = d.v;
+    if (!d.same) {
+      S.klass = d.cls; S.seat = d.seat; S.hidden = d.cls.hidden || [];
+      S.mine = Object.fromEntries(Object.entries(d.mine || {}).map(([k, c]) => [k, toMine(c)]));
+      S.cls = {}; S.ranks = {};
+      for (const [pid, s] of Object.entries(d.sum || {})) { S.cls[pid] = { tried: s.t, ac: s.a }; S.ranks[pid] = s.r; }
+      S.classmates = d.mates || {}; S.comments = d.comments || [];
     }
+    if (S.klass) { S.user.cls = S.klass.name; S.user.seat = S.seat; }
   }
   saveState();
 }
@@ -107,10 +134,12 @@ let syncing = null;
 function backgroundSync(force) {
   if (!S || syncing) return syncing;
   if (!force && Date.now() - (S.syncedAt || 0) < 10 * 60000) return null;
-  syncing = api('/api/sync', { full: !!force }).then(d => {
+  syncing = api('/api/sync', { cid: S.cid, v: S.v, pv: customPv() }).then(d => {
+    const wasGuest = isGuest();
     applySync(d); renderNav();
     const page = location.hash.split('?')[0].split('/')[1] || '';
-    if (!isTeacher() && ['problems', 'submissions'].includes(page)) router();
+    if (wasGuest !== isGuest()) router();
+    else if ((!d.same || d.custom) && !isTeacher() && ['problems', 'submissions'].includes(page)) router();
   }).catch(e => { if (force) toast(e.message); }).finally(() => { syncing = null; });
   return syncing;
 }
@@ -319,6 +348,25 @@ function createEditor(el, value, { onChange, readOnly } = {}) {
   }
   return cm;
 }
+// 程式碼文字放大／縮小（講解時用）：只改程式碼區的字，不影響整個網頁的版面
+const ZOOM_MIN = 12, ZOOM_MAX = 40;
+const codeFont = () => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, +store.get('cj-fs') || 16));
+const zoomButtons = () => `<span class="zoom" title="程式碼文字大小"><button class="btn sm" data-zoom="-2">A−</button><span class="zoom-val">${codeFont()}</span><button class="btn sm" data-zoom="2">A+</button></span>`;
+// targets()：回傳要調整的 CodeMirror 與其他元素（例如執行結果）
+function bindZoom(targets) {
+  const apply = () => {
+    const fs = codeFont();
+    for (const t of targets()) {
+      if (!t) continue;
+      if (t.getWrapperElement) { t.getWrapperElement().style.fontSize = fs + 'px'; t.refresh(); }
+      else t.style.fontSize = Math.round(fs * 0.9) + 'px';
+    }
+    $$('.zoom-val').forEach(el => el.textContent = fs);
+  };
+  $$('[data-zoom]').forEach(b => b.onclick = () => { store.set('cj-fs', codeFont() + +b.dataset.zoom); apply(); });
+  apply();
+}
+
 // 標示錯誤行、警告行與全形符號
 function markErrors(cm, diags) {
   cm.clearGutter('err-gutter');
@@ -356,15 +404,17 @@ function diagHtml(diags, max = 4) {
 // ============ 版面 ============
 function renderNav() {
   const r = location.hash.split('?')[0].split('/')[1] || '';
-  const links = !S ? [] : [
+  const links = !S || isGuest() ? [] : [
     ['problems', '題目'], ['submissions', isTeacher() ? '解題動態' : '我的紀錄'],
-    ...(isTeacher() ? [['scoreboard', '成績總表'], ['admin', '管理']] : []),
+    ...(isTeacher() ? [['scoreboard', '成績總表'], ['classes', '班級管理']] : []),
+    ...(isAdmin() ? [['admin', '系統管理' + (S.pending ? ` <span class="dot-badge">${S.pending}</span>` : '')]] : []),
   ];
-  $('#nav').innerHTML = links.map(([k, t]) => `<a href="#/${k}" class="${r === k || (r === 'problem' && k === 'problems') || (r === 'submission' && k === 'submissions') ? 'on' : ''}">${t}</a>`).join('');
+  $('#nav').innerHTML = links.map(([k, t]) => `<a href="#/${k}" class="${r === k || (r === 'problem' && k === 'problems') || (r === 'submission' && k === 'submissions') || (r === 'class' && k === 'classes') ? 'on' : ''}">${t}</a>`).join('');
   if (!S) { $('#userbox').innerHTML = ''; return; }
+  if (isGuest()) { $('#userbox').innerHTML = `<span class="who">${esc(S.user.email)}</span><button class="btn sm" id="logout">登出</button>`; $('#logout').onclick = logout; return; }
   const n = notifList().length;
   $('#userbox').innerHTML = `
-    <button class="bell" id="bell" title="老師的回饋">🔔<span class="dot" ${n ? '' : 'style="display:none"'}>${n}</span></button>
+    <button class="bell" id="bell" title="${isTeacher() ? '學生的回覆' : '老師的回饋'}">🔔<span class="dot" ${n ? '' : 'style="display:none"'}>${n}</span></button>
     ${isTeacher() ? '' : `<button class="bell" id="syncBtn" title="重新整理成績與留言">🔄</button>`}
     <a href="#/me" class="who">${isTeacher() ? '👩‍🏫 ' : ''}${S.user.cls ? esc(S.user.cls) + ' ' : ''}${esc(S.user.name)}</a>
     <button class="btn sm" id="logout">登出</button>`;
@@ -408,10 +458,14 @@ async function router() {
   }
   if (!S && page !== 'login') { location.hash = '#/login'; return; }
   renderNav();
-  const views = { login: viewLogin, problems: viewProblems, problem: viewProblem, submissions: viewSubmissions, submission: viewSubmission, scoreboard: viewScoreboard, admin: viewAdmin, me: viewMe };
+  const views = { login: viewLogin, welcome: viewWelcome, problems: viewProblems, problem: viewProblem, submissions: viewSubmissions, submission: viewSubmission, scoreboard: viewScoreboard, classes: viewClasses, class: viewClass, admin: viewAdmin, me: viewMe, tests: viewTests, edit: viewEdit };
   const v = views[page];
   if (!v) { location.hash = '#/problems'; return; }
-  if (['scoreboard', 'admin'].includes(page) && !isTeacher()) { location.hash = '#/problems'; return; }
+  if (isGuest() && !['welcome', 'login'].includes(page)) { location.hash = '#/welcome'; return; }
+  if (!isGuest() && page === 'welcome') { location.hash = '#/problems'; return; }
+  if (['scoreboard', 'classes', 'class'].includes(page) && !isTeacher()) { location.hash = '#/problems'; return; }
+  if (['admin', 'edit'].includes(page) && !isAdmin()) { location.hash = '#/problems'; return; }
+  if (page === 'tests' && !(S.user && S.user.canTests)) { location.hash = '#/problems'; return; }
   try { await v(decodeURIComponent(arg)); }
   catch (e) {
     app().innerHTML = `<div class="card"><div class="err">${esc(e.message)}</div><button class="btn primary" id="retryPage" style="margin-top:10px">↻ 重新載入</button></div>`;
@@ -428,7 +482,7 @@ function viewLogin() {
   app().innerHTML = `<div class="login-wrap"><div class="card" style="text-align:center">
     <h1>NEHS C++ Judge</h1><div class="muted">資訊科技 · C++ 線上解題系統</div>
     <div class="series-intro">${SERIES_KEYS.map(k => `<div><b>${esc(DATA.series[k].name)}</b><span>${PROBS.filter(p => p.series === k).length} 題</span></div>`).join('')}</div>
-    <p style="margin:20px 0 12px">請使用<b>學校的 Google 帳號</b>登入${CFG.DOMAIN ? `<br><span class="muted small">（@${esc(CFG.DOMAIN)}）</span>` : ''}</p>
+    <p style="margin:20px 0 12px">請使用 <b>Google 帳號</b>登入${CFG.DOMAIN ? `<br><span class="muted small">（限 @${esc(CFG.DOMAIN)}）</span>` : '<br><span class="muted small">學生：加入老師的班級後就能解題　老師：可以申請帳號、建立自己的班級</span>'}</p>
     <div id="gbtn" style="display:flex;justify-content:center;min-height:44px"><span class="muted">Google 登入按鈕載入中…</span></div>
     ${CFG.DEV_LOGIN ? '<div class="row" style="justify-content:center;margin-top:12px"><input type="text" id="devMail" placeholder="測試用 Email" style="width:220px"><button class="btn" id="devGo">測試登入</button></div>' : ''}
     <div class="err" id="lerr"></div>
@@ -438,11 +492,11 @@ function viewLogin() {
   const finish = async credential => {
     $('#lerr').textContent = ''; $('#gbtn').innerHTML = '<span class="muted">登入中…</span>';
     try {
-      const d = await api('/api/login', { credential });
+      const d = await api('/api/login', { credential, pv: customPv() });
       S = { token: d.token, subs: [] };
       applySync(d);
-      location.hash = '#/problems';
-      Judge.start().catch(() => { });
+      location.hash = isGuest() ? '#/welcome' : '#/problems';
+      if (!isGuest()) Judge.start().catch(() => { });
     } catch (err) { $('#lerr').textContent = err.message; renderBtn(); }
   };
   const renderBtn = () => {
@@ -465,8 +519,10 @@ function viewMe() {
   const used = (() => { try { return Math.round(JSON.stringify(localStorage).length / 1024); } catch { return 0; } })();
   app().innerHTML = `<div class="login-wrap" style="max-width:560px"><div class="card">
     <h2>帳號資訊</h2>
-    <p>${esc(S.user.name)}<br><span class="muted">${esc(S.user.email)}</span><br>${S.user.cls ? `${esc(S.user.cls)} 班 ${S.user.seat} 號` : '老師'}</p>
-    <p class="muted small">使用學校 Google 帳號登入，${'登入狀態會保留 14 天'}；在公用電腦上使用完畢請記得按「登出」。<br>
+    <p>${esc(S.user.name)}<br><span class="muted">${esc(S.user.email)}</span><br>${isTeacher() ? (isAdmin() ? '系統管理員' : '老師') : `${esc(S.user.cls || '')} 班 ${S.user.seat || ''} 號`}</p>
+    ${!isTeacher() && (S.user.classes || []).length > 1 ? `<p>切換班級：<select id="swCls">${S.user.classes.map(c => `<option value="${esc(c.cid)}" ${c.cid === S.cid ? 'selected' : ''}>${esc(c.name)}（${c.seat} 號）</option>`).join('')}</select></p>` : ''}
+    ${!isTeacher() ? '<p><a href="javascript:void 0" id="joinMore">＋ 用代碼加入另一個班級</a></p>' : ''}
+    <p class="muted small">登入狀態會保留 14 天；在公用電腦上使用完畢請記得按「登出」。<br>
       上次與伺服器同步：${S.syncedAt ? fmtTime(S.syncedAt) : '—'}</p>
     <h3>C++ 編譯器</h3>
     <p id="ccInfo" class="small"></p>
@@ -479,6 +535,56 @@ function viewMe() {
   });
   $('#clearCC').onclick = async () => {
     try { for (const k of await caches.keys()) if (k.startsWith('cj-')) await caches.delete(k); toast('已清除，重新整理後會重新下載'); } catch (e) { toast(e.message); }
+  };
+  if ($('#swCls')) $('#swCls').onchange = async e => {
+    S.cid = e.target.value; S.v = null;
+    await backgroundSync(true); toast('已切換到 ' + (S.klass ? S.klass.name : '')); location.hash = '#/problems';
+  };
+  if ($('#joinMore')) $('#joinMore').onclick = () => { $('.login-wrap').insertAdjacentHTML('beforeend', joinCard()); bindJoin(); $('#jCode').focus(); };
+}
+
+// ============ 還沒有班級的帳號：加入班級或申請老師 ============
+const joinCard = () => `<div class="card" id="joinCard"><h2>🎒 我是學生：加入班級</h2>
+  <p class="muted small">向老師拿「班級代碼」（6 個字），再輸入你的座號和姓名。</p>
+  <div class="form-grid"><label>班級代碼</label><input type="text" id="jCode" maxlength="8" style="text-transform:uppercase;width:160px">
+    <label>座號</label><input type="number" id="jSeat" min="1" max="999" style="width:100px">
+    <label>姓名</label><input type="text" id="jName" style="width:200px" value="${esc(S.googleName || '')}"></div>
+  <div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn primary" id="jGo">加入班級</button></div><div class="err" id="jErr"></div></div>`;
+function bindJoin() {
+  $('#jGo').onclick = async () => {
+    const b = $('#jGo'); b.disabled = true; $('#jErr').textContent = '';
+    try {
+      const d = await api('/api/join', { code: $('#jCode').value.trim(), seat: +$('#jSeat').value, name: $('#jName').value.trim() });
+      applySync(d); toast(`已加入 ${S.klass ? S.klass.name : ''} 班`); Judge.start().catch(() => { });
+      location.hash = '#/problems'; router();
+    } catch (e) { $('#jErr').textContent = e.message; }
+    b.disabled = false;
+  };
+}
+function viewWelcome() {
+  const ap = S.user.application;
+  app().innerHTML = `<div class="login-wrap" style="max-width:620px">
+    <div class="card"><h2>歡迎使用 NEHS C++ Judge</h2><p>你登入的帳號是 <b>${esc(S.user.email)}</b>，目前還沒有加入任何班級。</p>
+      <p class="muted small">如果老師已經把你的 Email 放進班級名單，請按右下角「重新檢查」。</p>
+      <div class="row"><span class="spacer"></span><button class="btn" id="recheck">↻ 重新檢查</button></div></div>
+    ${joinCard()}
+    ${ap ? `<div class="card"><h2>👩‍🏫 老師帳號申請</h2>${ap.status === 'pending' ? `<p>你在 ${fmtTime(ap.time)} 申請了老師帳號（${esc(ap.school)}），<b>正在等待系統管理員審核</b>。審核通過後按「重新檢查」即可。</p>`
+      : ap.status === 'rejected' ? '<p class="mine-tried">你的老師帳號申請沒有通過，如有疑問請聯絡系統管理員。</p>' : `<p>帳號狀態：${esc(ap.status)}</p>`}</div>`
+      : S.teacherApply ? `<div class="card"><h2>👩‍🏫 我是老師：申請帳號</h2>
+      <p class="muted small">通過審核後，就可以建立自己的班級、匯入學生名單、查看成績。</p>
+      <div class="form-grid"><label>姓名</label><input type="text" id="aName" style="width:220px" value="${esc(S.googleName || '')}">
+        <label>學校</label><input type="text" id="aSchool" style="width:280px">
+        <label>備註</label><input type="text" id="aNote" placeholder="任教科目、聯絡方式等（可不填）"></div>
+      <div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn primary" id="aGo">送出申請</button></div><div class="err" id="aErr"></div></div>` : ''}
+  </div>`;
+  bindJoin();
+  $('#recheck').onclick = async () => { await backgroundSync(true); if (isGuest()) toast('還沒有加入班級'); };
+  if ($('#aGo')) $('#aGo').onclick = async () => {
+    const b = $('#aGo'); b.disabled = true; $('#aErr').textContent = '';
+    try {
+      const d = await api('/api/apply', { name: $('#aName').value.trim(), school: $('#aSchool').value.trim(), note: $('#aNote').value.trim() });
+      applySync(d); toast(isTeacher() ? '已開通老師帳號' : '已送出申請，請等待審核'); router();
+    } catch (e) { $('#aErr').textContent = e.message; b.disabled = false; }
   };
 }
 
@@ -618,7 +724,9 @@ async function viewProblem(id) {
   <div class="problem-layout">
     <div>
       <div class="card">
-        <div class="ptitle"><span class="pid">${p.id}</span><h2 style="margin:0">${esc(p.title)}</h2>${myStat(p) && myStat(p).ac ? '<span class="mine-ac">✔ 已通過</span>' : ''}</div>
+        <div class="ptitle"><span class="pid">${p.id}</span><h2 style="margin:0">${esc(p.title)}</h2>${myStat(p) && myStat(p).ac ? '<span class="mine-ac">✔ 已通過</span>' : ''}
+          ${p.custom ? '<span class="tag">自訂</span>' : ''}<span class="spacer"></span>
+          ${S.user.canTests ? `<a class="btn sm" href="#/tests/${p.id}">🔍 測資與解答</a>` : ''}${isAdmin() ? ` <a class="btn sm" href="#/edit/${p.id}">✏ 編輯題目</a>` : ''}</div>
         <div class="muted small" style="margin:4px 0 10px">${esc(DATA.series[p.series].name)} · ${esc(topic.name)} · ${stars(p.difficulty)} · 時間限制 ${p.timeLimitMs / 1000} 秒 · ${p.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
         <details class="lesson" ${store.get('cj-lesson-' + p.topic) === 'open' ? 'open' : ''}><summary>📘 語法說明：${esc(topic.name)}</summary><div class="lesson-body">${renderLesson(topic.text)}</div></details>
         <h3>題目內容</h3><div class="pbody">${esc(p.content)}</div>
@@ -639,6 +747,7 @@ async function viewProblem(id) {
       <div class="card editor-card">
         <div class="toolbar">
           <b>C++ 程式碼</b><span class="cc-status" id="ccst"></span><span class="spacer"></span>
+          ${zoomButtons()}
           <button class="btn sm" id="btnReset" title="恢復成空白的程式架構">↺ 重設</button>
           <button class="btn" id="btnRun" title="Ctrl + Enter">▶ 執行測試</button>
           <button class="btn primary" id="btnSubmit">送出評測</button>
@@ -700,6 +809,7 @@ async function viewProblem(id) {
     else cm.setValue(code);
     cm.focus(); toast('已放到編輯器，可以按「執行測試」試試看');
   });
+  bindZoom(() => [cm, $('#stdin'), $('#stdout')]);
   $('#btnReset').onclick = () => { if (confirm('確定要清除目前的程式，恢復成空白架構嗎？')) { cm.setValue(p.template || TEMPLATE); cm.setCursor(4, 4); cm.focus(); } };
 
   const busy = on => { $('#btnRun').disabled = $('#btnSubmit').disabled = on; };
@@ -739,9 +849,9 @@ async function viewProblem(id) {
       const j = await Judge.judgeAll(code, p, (i, n) => { res.innerHTML = `<div class="result-box">評測中… 第 ${i} / ${n} 組測資</div>`; });
       markErrors(cm, j.compile.diags); lintBox(j.compile.diags, j.compile.success);
       res.innerHTML = '<div class="result-box">上傳結果中…</div>';
-      const d = await api('/api/submit', { problemId: p.id, code, version: DATA.version, ...j.payload });
+      const d = await api('/api/submit', { problemId: p.id, code, version: DATA.version, pver: p.ver, cid: S.cid, ...j.payload });
       const sub = Object.assign(d.submission, { code, diags: j.compile.diags, local: (j.local || []).map(r => ({ stdout: (r.stdout || '').slice(0, 2000), stderr: (r.stderr || '').slice(0, 500), error: r.error, exitCode: r.exitCode })) });
-      recordSubmission(p, sub, d.mine);
+      recordSubmission(p, sub, d);
       res.innerHTML = renderResult(sub, p, next);
       res.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       refreshTab();
@@ -775,12 +885,13 @@ async function viewProblem(id) {
   // 老師：全班狀況（每 20 秒自動更新）
   async function teacherStatus(doFetch, rankMode) {
     const el = $('#ptab');
-    const cls = store.get('cj-cls') || '';
+    const cid = teacherCid();
+    if (!cid) { el.innerHTML = '<p class="muted">你還沒有班級，請到「班級管理」建立班級。</p>'; return; }
     if (!statusCache) el.innerHTML = '<div class="loading">載入中…</div>';
-    if (doFetch || !statusCache) statusCache = await apiGet('/api/problem-status/' + p.id, { cls });
+    if (doFetch || !statusCache) statusCache = await apiGet('/api/problem-status/' + p.id, { cid });
     if (!$('#ptab') || tab === 'mine') return;
     const d = statusCache;
-    const sel = `<select id="clsSel"><option value="">全部班級</option>${d.classes.map(x => `<option ${x === cls ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>`;
+    const sel = classSelect('clsSel', cid);
     if (rankMode) {
       const list = d.students.filter(s => s.p && s.p.ac).sort((a, b) => a.cls.localeCompare(b.cls) || a.rank - b.rank);
       el.innerHTML = `<div class="row" style="margin-bottom:8px">班級：${sel}<span class="muted small">每 20 秒自動更新</span></div>` + (list.length ? `<div class="table-wrap"><table class="list"><thead><tr><th>名次</th><th>班級座號</th><th>姓名</th><th>完成時間</th><th>次數</th><th></th></tr></thead><tbody>
@@ -795,26 +906,31 @@ async function viewProblem(id) {
           <td>${s.p ? s.p.best : ''}</td><td>${s.p ? s.p.tries : ''}</td><td>${s.p && s.p.ac ? fmtTime(s.p.firstAC) : ''}</td>
           <td>${s.p ? `<a href="#/submission/${s.p.lastId}">看程式碼</a>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
     }
-    $('#clsSel').onchange = e => { store.set('cj-cls', e.target.value); statusCache = null; refreshTab(); };
+    $('#clsSel').onchange = e => { store.set('cj-tcid', e.target.value); statusCache = null; refreshTab(); };
   }
   refreshTab(false);
   if (isTeacher()) pageTimers.push(setInterval(() => { if (tab !== 'mine' && !document.hidden) refreshTab(); }, 20000));
 }
 
-// 把送出的結果記在瀏覽器裡（不需要再向伺服器要資料）
-function recordSubmission(p, sub, mine) {
+// 把送出的結果記在瀏覽器裡；伺服器同時回傳這一題最新的本班統計，不需要另外下載
+function recordSubmission(p, sub, d) {
   S.subs = S.subs || [];
   S.subs.unshift({ id: sub.id, pid: p.id, verdict: sub.verdict, score: sub.score, timeMs: sub.timeMs, time: sub.time, code: sub.code, tests: sub.tests, error: sub.error, diags: (sub.diags || []).slice(0, 5), local: sub.local });
-  if (!isTeacher()) {
-    const before = (S.mine || {})[p.id];
+  if (!isTeacher() && d.mine) {
     S.mine = S.mine || {}; S.cls = S.cls || {}; S.ranks = S.ranks || {};
-    const c = S.cls[p.id] || (S.cls[p.id] = { tried: 0, ac: 0 });
-    if (!before) c.tried++;
-    if (mine.firstAC && !(before && before.ac)) { c.ac++; (S.ranks[p.id] = S.ranks[p.id] || []).push([S.user.seat, mine.firstAC, mine.triesToAC]); S.ranks[p.id].sort((a, b) => a[1] - b[1]); }
-    S.mine[p.id] = Object.assign({}, mine, { ac: !!mine.firstAC });
+    S.mine[p.id] = toMine(d.mine);
+    if (d.sum) { S.cls[p.id] = { tried: d.sum.t, ac: d.sum.a }; S.ranks[p.id] = d.sum.r; }
+    if (d.v) S.v = d.v;
   }
   saveState();
 }
+// 老師目前選的班級
+function teacherClasses() { return (S.classes || []).filter(c => !c.archived); }
+function teacherCid() {
+  const list = teacherClasses(), saved = store.get('cj-tcid');
+  return (list.find(c => c.id === saved) || list[0] || {}).id || '';
+}
+const classSelect = (id, cid, withAll) => `<select id="${id}">${withAll ? '<option value="">我的全部班級</option>' : ''}${teacherClasses().map(c => `<option value="${esc(c.id)}" ${c.id === cid ? 'selected' : ''}>${esc(c.name)}${isAdmin() && c.owner !== S.user.email ? `（${esc(c.ownerName)}）` : ''}</option>`).join('')}</select>`;
 
 function testMessage(p, sub, i) {
   const t = sub.tests[i], loc = (sub.local || [])[i] || {};
@@ -874,15 +990,16 @@ async function viewSubmissions() {
   const q = Object.fromEntries(new URLSearchParams(location.hash.split('?')[1] || ''));
   app().innerHTML = `<div class="card">
     <div class="row"><h2 style="margin:0">解題動態</h2><span class="spacer"></span>
-      <select id="fcls"><option value="">全部班級</option>${(S.classes || []).map(c => `<option>${esc(c)}</option>`).join('')}</select>
+      ${classSelect('fcls', '', true)}
       <select id="fprob"><option value="">全部題目</option>${PROBS.map(p => `<option value="${p.id}">${p.id} ${esc(p.title)}</option>`).join('')}</select>
       <select id="fv"><option value="">全部結果</option>${Object.entries(VERDICT).map(([k, v]) => `<option value="${k}">${k} ${v}</option>`).join('')}</select>
       <label class="small"><input type="checkbox" id="auto" checked> 每 20 秒自動更新</label>
     </div></div>
     <div class="card" id="subs"><div class="loading">載入中…</div></div>`;
   let page = 1;
-  const f = { cls: q.cls ?? store.get('cj-cls') ?? '', problem: q.problem || '', verdict: q.verdict || '', account: q.account || '' };
-  $('#fcls').value = f.cls; $('#fprob').value = f.problem; $('#fv').value = f.verdict;
+  const f = { cid: q.cid ?? store.get('cj-feedcid') ?? '', problem: q.problem || '', verdict: q.verdict || '', account: q.account || '' };
+  if (f.cid && !teacherClasses().some(c => c.id === f.cid)) f.cid = '';
+  $('#fcls').value = f.cid; $('#fprob').value = f.problem; $('#fv').value = f.verdict;
   async function load() {
     const d = await apiGet('/api/feed', { ...f, page });
     if (!$('#subs')) return;
@@ -892,7 +1009,7 @@ async function viewSubmissions() {
     if ($('#pgPrev')) $('#pgPrev').onclick = () => { page--; load(); };
     if ($('#pgNext')) $('#pgNext').onclick = () => { page++; load(); };
   }
-  $('#fcls').onchange = e => { f.cls = e.target.value; store.set('cj-cls', f.cls); page = 1; load(); };
+  $('#fcls').onchange = e => { f.cid = e.target.value; store.set('cj-feedcid', f.cid); page = 1; load(); };
   $('#fprob').onchange = e => { f.problem = e.target.value; page = 1; load(); };
   $('#fv').onchange = e => { f.verdict = e.target.value; page = 1; load(); };
   await load();
@@ -939,7 +1056,7 @@ async function viewSubmission(id) {
   </div>
   <div class="problem-layout">
     <div class="card">
-      <h3 style="margin-top:0">程式碼 ${isTeacher() ? '<span class="muted small">（點行號可以針對那一行留言）</span>' : ''}</h3>
+      <div class="row"><h3 style="margin:0">程式碼 ${isTeacher() ? '<span class="muted small">（點行號可以針對那一行留言）</span>' : ''}</h3><span class="spacer"></span>${zoomButtons()}</div>
       <div id="code" class="readonly ${isTeacher() ? 'teacher' : ''}"></div>
       <h3>評測結果</h3>
       <div id="resbox">${renderResult(s, p)}</div>
@@ -955,6 +1072,7 @@ async function viewSubmission(id) {
     </div>
   </div>`;
   const cm = createEditor($('#code'), s.code || '', { readOnly: true });
+  bindZoom(() => [cm]);
   setTimeout(() => cm.refresh(), 0);
   markErrors(cm, s.diags || (s.error && s.error.line ? [{ line: s.error.line, kind: 'error', msg: s.error.msg }] : []));
   const markComments = () => comments.forEach(c => c.line && c.line <= cm.lineCount() && cm.addLineClass(c.line - 1, 'background', 'cm-comment-line'));
@@ -997,20 +1115,58 @@ async function viewSubmission(id) {
   };
 }
 
-// ============ 成績總表（老師，每 20 秒更新） ============
+// ============ 成績總表（老師，每 20 秒檢查一次；沒有變動時伺服器只回「沒變」） ============
+const GRADE_DEFAULT = { cond: 'ac', base: 60, bonus: 40, mode: 'linear', step: 2 };
+const gradeCfg = () => Object.assign({}, GRADE_DEFAULT, store.json('cj-grade', {}));
+// 換算一格的成績：有做 → 基本分；通過的再依本班完成名次加分
+// cell = [最高分, 送出次數, 首次通過時間, 最後提交編號, 名次, 通過的提交編號]；n = 這一題本班通過人數
+function gradeOf(cell, n, cfg) {
+  if (!cell) return 0;
+  const done = cfg.cond === 'ac' ? !!cell[2] : cfg.cond === 'score' ? cell[0] > 0 : cell[1] > 0;
+  if (!done) return 0;
+  let bonus = 0;
+  if (cell[2] && cell[4]) bonus = cfg.mode === 'linear' ? (n <= 1 ? cfg.bonus : cfg.bonus * (n - cell[4]) / (n - 1)) : Math.max(0, cfg.bonus - (cell[4] - 1) * cfg.step);
+  return Math.round((+cfg.base + bonus) * 10) / 10;
+}
 async function viewScoreboard() {
-  let cls = store.get('cj-cls') ?? '';
+  if (!teacherClasses().length) { app().innerHTML = '<div class="card"><h2>成績總表</h2><p>你還沒有班級，請先到 <a href="#/classes">班級管理</a> 建立班級。</p></div>'; return; }
+  let cid = teacherCid();
   let series = store.get('cj-sb-series') || 'a';
   let topic = store.get('cj-sb-topic') || '';
+  let mode = store.get('cj-sb-mode') || 'raw';
+  const cfg = gradeCfg();
   app().innerHTML = `<div class="card"><div class="row"><h2 style="margin:0">成績總表</h2><span class="spacer"></span>
     <label class="small"><input type="checkbox" id="auto" checked> 每 20 秒自動更新</label>
-    <button class="btn" id="csv">⬇ 匯出 CSV（Excel）</button>
+    <button class="btn" id="csv">⬇ 下載 CSV（Excel）</button>
     <button class="btn" id="toSheet">寫入 Google Sheet</button></div>
-    <div class="tabs cls-tabs" id="clsTabs" style="margin:12px 0 0"></div>
+    <div class="tabs cls-tabs" id="clsTabs" style="margin:12px 0 0">${teacherClasses().map(c => `<button data-c="${esc(c.id)}" class="${c.id === cid ? 'on' : ''}">${esc(c.name)}</button>`).join('')}</div>
     <div class="row" style="margin-top:8px">系列：<select id="sbSeries">${SERIES_KEYS.map(k => `<option value="${k}" ${k === series ? 'selected' : ''}>${esc(DATA.series[k].name)}</option>`).join('')}</select>
       單元：<select id="sbTopic"></select>
-      <span class="muted small">綠＝通過、橘＝部分得分、紅＝0 分；格子內是最高分，點格子看最後一次的程式碼。<span class="online"></span>＝2 分鐘內有活動</span></div></div>
+      顯示：<select id="sbMode"><option value="raw" ${mode === 'raw' ? 'selected' : ''}>原始分數</option><option value="grade" ${mode === 'grade' ? 'selected' : ''}>換算成績</option></select>
+      <span class="muted small">綠＝通過、橘＝部分得分、紅＝0 分；點格子看最後一次的程式碼。<span class="online"></span>＝2 分鐘內有活動</span></div>
+    <details class="grade-box" ${mode === 'grade' ? 'open' : ''}><summary>📊 成績換算設定（有做的給基本分，通過的再依完成名次加分）</summary>
+      <div class="grade-grid">
+        <label>怎樣算「有做」</label><select id="gCond"><option value="ac">通過（AC）</option><option value="score">有得分（部分正確也算）</option><option value="tried">有送出就算</option></select>
+        <label>有做的基本分</label><input type="number" id="gBase" min="0" max="100" style="width:90px">
+        <label>名次加分最多</label><input type="number" id="gBonus" min="0" max="100" style="width:90px">
+        <label>名次加分方式</label><div><select id="gMode"><option value="linear">依名次比例：第 1 名加滿分，最後一位通過的加 0 分</option><option value="step">每差一名少幾分</option></select>
+          <span id="gStepBox">　每名少 <input type="number" id="gStep" min="0" max="100" step="0.5" style="width:70px"> 分（最少 0 分）</span></div>
+      </div>
+      <p class="muted small" id="gExample"></p>
+      <p class="muted small">名次依「本班第一次通過的時間」排序；只有通過（AC）的同學有名次加分。每一題換算後最高 ${'<b id="gMax"></b>'} 分，「平均」是目前選擇範圍內所有題目的平均。</p>
+    </details></div>
     <div id="sb"><div class="card loading">載入中…</div></div>`;
+  $('#gCond').value = cfg.cond; $('#gBase').value = cfg.base; $('#gBonus').value = cfg.bonus; $('#gMode').value = cfg.mode; $('#gStep').value = cfg.step;
+  const readCfg = () => {
+    const c = { cond: $('#gCond').value, base: +$('#gBase').value || 0, bonus: +$('#gBonus').value || 0, mode: $('#gMode').value, step: +$('#gStep').value || 0 };
+    store.set('cj-grade', JSON.stringify(c));
+    $('#gStepBox').style.display = c.mode === 'step' ? '' : 'none';
+    $('#gMax').textContent = c.base + c.bonus;
+    const ex = n => Array.from({ length: Math.min(n, 5) }, (_, i) => gradeOf([100, 1, 1, 0, i + 1], n, c));
+    $('#gExample').textContent = `例：某題全班有 10 人通過 → 第 1～5 名分別得 ${ex(10).join('、')} 分…；沒通過但${c.cond === 'ac' ? '（不算有做）得 0 分' : '有做得 ' + c.base + ' 分'}；沒做 0 分。`;
+    return c;
+  };
+  readCfg();
   const fillTopics = () => {
     const ts = Object.entries(DATA.topics).filter(([, t]) => t.series === series);
     if (!ts.some(([k]) => k === topic)) topic = '';
@@ -1019,103 +1175,361 @@ async function viewScoreboard() {
   fillTopics();
   let last = null;
   const probsNow = () => PROBS.filter(p => p.series === series && (!topic || p.topic === topic));
+  const acCountOf = pid => last.students.filter(r => r.cells[pid] && r.cells[pid][2]).length;
+  // 表格資料（下載與寫入 Google Sheet 共用）
+  const tableRows = () => {
+    const ps = probsNow(), c = readCfg(), cls = last.cls.name;
+    const n = Object.fromEntries(ps.map(p => [p.id, acCountOf(p.id)]));
+    const head = ['班級', '座號', '姓名', 'Email', ...ps.map(p => `${p.id} ${p.title}`), '通過題數', '原始總分', `換算平均（每題 ${c.base + c.bonus} 分）`, '換算總分'];
+    const rows = last.students.map(r => {
+      const raw = ps.map(p => r.cells[p.id] ? r.cells[p.id][0] : ''), g = ps.map(p => gradeOf(r.cells[p.id], n[p.id], c));
+      const gsum = g.reduce((a, b) => a + b, 0);
+      return [cls, r.seat, r.name, r.email, ...(mode === 'grade' ? g : raw), ps.filter(p => r.cells[p.id] && r.cells[p.id][2]).length,
+        raw.reduce((a, b) => a + (+b || 0), 0), ps.length ? Math.round(gsum / ps.length * 10) / 10 : 0, Math.round(gsum * 10) / 10];
+    });
+    return [head, ...rows];
+  };
   $('#csv').onclick = () => {
     if (!last) return;
-    const ps = probsNow(), q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const lines = [['班級', '座號', '姓名', 'Email', ...ps.map(p => `${p.id} ${p.title}`), '通過題數', '總分'].map(q).join(',')];
-    for (const r of last.students) {
-      const cells = ps.map(p => r.cells[p.id] ? r.cells[p.id][0] : '');
-      lines.push([r.cls, r.seat, r.name, r.email, ...cells, ps.filter(p => r.cells[p.id] && r.cells[p.id][2]).length, cells.reduce((a, b) => a + (+b || 0), 0)].map(q).join(','));
-    }
+    const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' }));
-    a.download = `成績_${cls || '全部'}_${DATA.series[series].name}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    a.href = URL.createObjectURL(new Blob(['﻿' + tableRows().map(r => r.map(q).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' }));
+    a.download = `成績_${last.cls.name}_${DATA.series[series].name}${topic ? '_' + DATA.topics[topic].name : ''}_${mode === 'grade' ? '換算' : '原始'}.csv`;
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
   $('#toSheet').onclick = async () => {
+    if (!last) return;
     const b = $('#toSheet'); b.disabled = true;
-    try { toast((await api('/api/scoreboard/sheet', { cls, problems: probsNow().map(p => p.id) })).msg, 4000); } catch (e) { toast(e.message); }
+    try { toast((await api('/api/scoreboard/sheet', { cid, rows: tableRows() })).msg, 4000); } catch (e) { toast(e.message); }
     b.disabled = false;
   };
   const online = t => t && Date.now() - t < 120000;
-  const classTable = (c, rows) => {
-    const ps = probsNow();
-    const sum = r => ps.reduce((a, p) => a + (r.cells[p.id] ? r.cells[p.id][0] : 0), 0), acs = r => ps.filter(p => r.cells[p.id] && r.cells[p.id][2]).length;
-    return `<div class="card"><div class="row" style="margin-bottom:8px"><h2 style="margin:0">${esc(c)} 班</h2>
-      <span class="muted">${rows.length} 人 · 平均通過 ${rows.length ? (rows.reduce((a, r) => a + acs(r), 0) / rows.length).toFixed(1) : 0} 題</span></div>
-    <div class="table-wrap"><table class="list sb"><thead><tr><th class="name">座號</th><th class="name">姓名</th><th>通過</th><th>總分</th>
+  const render = () => {
+    if (!last || !$('#sb')) return;
+    const ps = probsNow(), rows = last.students, c = readCfg();
+    const n = Object.fromEntries(ps.map(p => [p.id, acCountOf(p.id)]));
+    const acs = r => ps.filter(p => r.cells[p.id] && r.cells[p.id][2]).length;
+    const sum = r => mode === 'grade' ? Math.round(ps.reduce((a, p) => a + gradeOf(r.cells[p.id], n[p.id], c), 0) / Math.max(1, ps.length) * 10) / 10
+      : ps.reduce((a, p) => a + (r.cells[p.id] ? r.cells[p.id][0] : 0), 0);
+    $('#sb').innerHTML = !rows.length ? `<div class="card"><p>這個班級還沒有學生，請到 <a href="#/class/${esc(cid)}">班級管理</a> 匯入名單或開放學生用代碼加入。</p></div>` :
+      `<div class="card"><div class="row" style="margin-bottom:8px"><h2 style="margin:0">${esc(last.cls.name)}</h2>
+      <span class="muted">${rows.length} 人 · 平均通過 ${(rows.reduce((a, r) => a + acs(r), 0) / rows.length).toFixed(1)} 題</span></div>
+    <div class="table-wrap"><table class="list sb"><thead><tr><th class="name">座號</th><th class="name">姓名</th><th>通過</th><th>${mode === 'grade' ? '換算平均' : '總分'}</th>
       ${ps.map(p => `<th class="p" title="${esc(p.title)}"><a href="#/problem/${p.id}">${p.id.slice(1)}</a></th>`).join('')}</tr></thead><tbody>
       ${rows.map(r => `<tr><td class="name">${seat2(r.seat)}</td>
-        <td class="name"><span class="${online(r.lastSeen) ? 'online' : 'offline'}"></span><a href="#/submissions?account=${esc(r.account)}">${esc(r.name)}</a></td>
+        <td class="name"><span class="${online(r.lastSeen) ? 'online' : 'offline'}"></span>${r.account ? `<a href="#/submissions?account=${esc(r.account)}&cid=${esc(cid)}">${esc(r.name)}</a>` : `${esc(r.name)} <span class="muted small">（未登入過）</span>`}</td>
         <td><b>${acs(r)}</b></td><td>${sum(r)}</td>
-        ${ps.map(p => { const x = r.cells[p.id]; return `<td>${x ? `<a class="cell ${x[2] ? 'ac' : x[0] > 0 ? 'part' : 'zero'}" href="#/submission/${x[3]}" title="${esc(p.id + ' ' + p.title)}｜送出 ${x[1]} 次${x[2] ? '｜首次通過 ' + fmtTime(x[2]) + '｜本班第 ' + x[4] + ' 名' : ''}">${x[2] ? '✔' : x[0]}</a>` : ''}</td>`; }).join('')}
+        ${ps.map(p => {
+          const x = r.cells[p.id]; if (!x) return '<td></td>';
+          const g = gradeOf(x, n[p.id], c);
+          return `<td><a class="cell ${x[2] ? 'ac' : x[0] > 0 ? 'part' : 'zero'}" href="#/submission/${x[3]}" title="${esc(p.id + ' ' + p.title)}｜最高 ${x[0]} 分｜送出 ${x[1]} 次${x[2] ? '｜首次通過 ' + fmtTime(x[2]) + '｜本班第 ' + x[4] + ' 名' : ''}｜換算 ${g} 分">${mode === 'grade' ? g : x[2] ? '✔' : x[0]}</a></td>`;
+        }).join('')}
       </tr>`).join('')}
-      </tbody><tfoot><tr><th class="name" colspan="4">通過人數</th>${ps.map(p => `<th>${rows.filter(r => r.cells[p.id] && r.cells[p.id][2]).length}</th>`).join('')}</tr></tfoot></table></div></div>`;
+      </tbody><tfoot><tr><th class="name" colspan="4">通過人數</th>${ps.map(p => `<th>${n[p.id]}</th>`).join('')}</tr></tfoot></table></div></div>`;
   };
-  const render = () => {
-    const d = last; if (!d || !$('#clsTabs')) return;
-    if (!d.classes.length) {
-      $('#clsTabs').innerHTML = '';
-      $('#sb').innerHTML = '<div class="card"><div class="friendly"><b>名單裡沒有任何學生。</b>請在 Google 試算表的「學生名單」工作表放入「班級、座號、姓名、Email」（或在 Code.gs 設定 ROSTER_SPREADSHEET_ID 讀取另一份試算表）。</div></div>';
+  async function load(full) {
+    const d = await apiGet('/api/scoreboard', { cid, v: full || !last ? '' : last.v });
+    if (d.same) {   // 沒有變動：只更新上線狀態
+      const seen = Object.fromEntries(d.seen);
+      last.students.forEach(r => r.lastSeen = seen[r.seat] || r.lastSeen);
+      $$('#sb td.name span.online, #sb td.name span.offline').forEach((el, i) => { const r = last.students[i]; if (r) el.className = online(r.lastSeen) ? 'online' : 'offline'; });
       return;
     }
-    $('#clsTabs').innerHTML = d.classes.map(c => `<button data-c="${esc(c)}" class="${c === cls ? 'on' : ''}">${esc(c)} 班</button>`).join('') +
-      `<button data-c="" class="${cls ? '' : 'on'}">全部班級</button>`;
-    $$('#clsTabs button').forEach(b => b.onclick = () => { cls = b.dataset.c; store.set('cj-cls', cls); last = null; $('#sb').innerHTML = '<div class="card loading">載入中…</div>'; load(); });
-    const list = cls ? [cls] : d.classes;
-    $('#sb').innerHTML = list.map(c => classTable(c, d.students.filter(r => r.cls === c))).join('');
-  };
-  async function load() {
-    const d = await apiGet('/api/scoreboard', { cls, series });
-    if (cls && !d.classes.includes(cls)) { cls = d.classes[0] || ''; store.set('cj-cls', cls); return load(); }
-    if (store.get('cj-cls') === null && d.classes.length) { cls = d.classes[0]; store.set('cj-cls', cls); return load(); }
     last = d; render();
   }
-  $('#sbSeries').onchange = e => { series = e.target.value; store.set('cj-sb-series', series); fillTopics(); last = null; $('#sb').innerHTML = '<div class="card loading">載入中…</div>'; load(); };
+  $$('#clsTabs button').forEach(b => b.onclick = () => { cid = b.dataset.c; store.set('cj-tcid', cid); $$('#clsTabs button').forEach(x => x.classList.toggle('on', x === b)); last = null; $('#sb').innerHTML = '<div class="card loading">載入中…</div>'; load(true); });
+  $('#sbSeries').onchange = e => { series = e.target.value; store.set('cj-sb-series', series); fillTopics(); render(); };
   $('#sbTopic').onchange = e => { topic = e.target.value; store.set('cj-sb-topic', topic); render(); };
-  await load();
+  $('#sbMode').onchange = e => { mode = e.target.value; store.set('cj-sb-mode', mode); if (mode === 'grade') $('.grade-box').open = true; render(); };
+  ['gCond', 'gBase', 'gBonus', 'gMode', 'gStep'].forEach(id => $('#' + id).oninput = $('#' + id).onchange = render);
+  await load(true);
   pageTimers.push(setInterval(() => { if ($('#auto') && $('#auto').checked && !document.hidden) load().catch(() => { }); }, 20000));
 }
 
-// ============ 管理（老師） ============
-async function viewAdmin() {
-  app().innerHTML = `<div class="card"><div class="tabs" id="atabs"><button data-t="open" class="on">題目開放設定</button><button data-t="users">名單</button></div><div id="atab"></div></div>`;
-  let tab = 'open';
-  $$('#atabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; $$('#atabs button').forEach(x => x.classList.toggle('on', x === b)); render(); });
-  async function render() {
-    const el = $('#atab');
-    if (tab === 'open') {
-      const h = hiddenSet();
-      el.innerHTML = `<p class="muted small">取消勾選的系列或單元，學生就看不到（也不能送出）。設定會在學生下次同步時生效（最晚 10 分鐘，或學生按 🔄）。</p>
-        ${SERIES_KEYS.map(k => `<div class="open-series"><label><input type="checkbox" data-h="${k}" ${h.has(k) ? '' : 'checked'}> <b>${esc(DATA.series[k].name)}</b>（${PROBS.filter(p => p.series === k).length} 題）</label>
-          <div class="open-topics">${Object.entries(DATA.topics).filter(([, t]) => t.series === k).map(([tk, t]) => `<label><input type="checkbox" data-h="${tk}" ${h.has(tk) ? '' : 'checked'}> ${esc(t.name)}（${PROBS.filter(p => p.topic === tk).length}）</label>`).join('')}</div></div>`).join('')}
-        <label style="display:block;margin-top:12px">另外要隱藏的題號（用逗號分隔，例如 a099, b050）：</label>
-        <input type="text" id="hideIds" style="width:100%" value="${esc([...h].filter(x => PMAP[x]).join(', '))}">
-        <div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn primary" id="saveOpen">儲存設定</button></div>
-        ${S.serverVersion && S.serverVersion !== DATA.version ? `<div class="friendly" style="margin-top:12px"><b>注意：題目版本不一致。</b>網站的 problems.js 是 ${esc(DATA.version)}，Apps Script 的 Answers.gs 是 ${esc(S.serverVersion)}。請確認兩邊都上傳了最新版，學生才能正確評測。</div>` : ''}`;
-      $('#saveOpen').onclick = async () => {
-        const hidden = $$('[data-h]').filter(c => !c.checked).map(c => c.dataset.h).concat($('#hideIds').value.split(/[,，\s]+/).map(s => s.trim().toLowerCase()).filter(x => PMAP[x]));
-        try { const r = await api('/api/settings', { hidden }); S.hidden = r.hidden; saveState(); toast('已儲存'); } catch (e) { toast(e.message); }
-      };
-    } else {
-      el.innerHTML = '<div class="loading">載入中…</div>';
-      const cls = store.get('cj-cls') || '';
-      const d = await apiGet('/api/users', { cls });
-      el.innerHTML = `<div class="row" style="margin-bottom:10px">班級：<select id="ucls"><option value="">全部</option>${d.classes.map(c => `<option ${c === cls ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
-        <span class="spacer"></span><a class="btn" href="${esc(d.sheetUrl)}" target="_blank" rel="noopener">開啟名單所在的 Google Sheet ↗</a></div>
-        <p class="muted small">學生用學校 Google 帳號登入，系統依 Email 對照名單判斷班級座號。名單直接在 Google Sheet 修改，10 分鐘內自動生效。</p>
-        <div class="table-wrap"><table class="list"><thead><tr><th>身分</th><th>班級</th><th>座號</th><th>姓名</th><th>Email</th><th>最近活動</th></tr></thead><tbody>
-        ${d.users.map(u => `<tr><td>${u.role === 'teacher' ? '老師' : '學生'}</td><td>${esc(u.cls)}</td><td>${u.seat || ''}</td><td>${esc(u.name)}</td><td>${esc(u.email)}</td>
-          <td class="small">${u.lastSeen ? `<span class="${Date.now() - u.lastSeen < 120000 ? 'online' : 'offline'}"></span>${fmtTime(u.lastSeen, true)}` : ''}</td></tr>`).join('')}</tbody></table></div>`;
-      $('#ucls').onchange = e => { store.set('cj-cls', e.target.value); render(); };
-    }
+// ============ 班級管理（老師） ============
+async function viewClasses() {
+  const list = S.classes || [];
+  app().innerHTML = `<div class="card"><div class="row"><h2 style="margin:0">班級管理</h2><span class="spacer"></span>
+      <input type="text" id="ncName" placeholder="新班級名稱，例如 901 或 七年級資訊社" style="width:280px"><button class="btn primary" id="ncGo">＋ 建立班級</button></div>
+    <p class="muted small">建立班級後，可以「貼上名單」（座號、姓名、Email），或把「加入代碼」給學生，讓學生登入後自己加入。</p></div>
+    <div class="card">${list.length ? `<div class="table-wrap"><table class="list"><thead><tr><th>班級</th><th>人數</th><th>加入代碼</th><th>學生自行加入</th>${isAdmin() ? '<th>老師</th>' : ''}<th></th></tr></thead><tbody>
+      ${list.map(c => `<tr class="${c.archived ? 'muted' : ''}"><td><a href="#/class/${esc(c.id)}"><b>${esc(c.name)}</b></a>${c.archived ? '（已封存）' : ''}</td><td>${c.count}</td>
+        <td><code class="jcode">${esc(c.code)}</code></td><td>${c.allowJoin ? '開放' : '<span class="muted">關閉</span>'}</td>${isAdmin() ? `<td class="small">${esc(c.ownerName)}</td>` : ''}
+        <td><a class="btn sm" href="#/class/${esc(c.id)}">管理名單與設定</a> <a class="btn sm" href="#/scoreboard" data-sb="${esc(c.id)}">成績</a></td></tr>`).join('')}</tbody></table></div>`
+      : '<p class="muted">還沒有班級。</p>'}</div>`;
+  $$('[data-sb]').forEach(a => a.onclick = () => store.set('cj-tcid', a.dataset.sb));
+  $('#ncGo').onclick = async () => {
+    const name = $('#ncName').value.trim(); if (!name) { toast('請輸入班級名稱'); return; }
+    const b = $('#ncGo'); b.disabled = true;
+    try { const d = await api('/api/class/create', { name }); S.classes = [...(S.classes || []), d.cls]; saveState(); location.hash = '#/class/' + d.cls.id; }
+    catch (e) { toast(e.message); b.disabled = false; }
+  };
+}
+// 解析貼上的名單：每一行「座號 姓名 Email」，用 Tab、逗號或空白分隔；Email 可以省略；第一行是標題也沒關係
+function parseRoster(text) {
+  const rows = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    const parts = line.split(/[\t,，]+|\s{2,}|\s+(?=\S+@)/).map(s => s.trim()).filter(Boolean);
+    const toks = parts.length >= 2 ? parts : line.trim().split(/\s+/);
+    const email = toks.find(t => /@/.test(t)) || '';
+    const seatTok = toks.find(t => /^\d{1,3}$/.test(t));
+    if (!seatTok) continue;
+    const name = toks.filter(t => t !== email && t !== seatTok && !/^\d+$/.test(t)).join(' ');
+    rows.push({ seat: +seatTok, name, email });
   }
-  render();
+  return rows;
+}
+async function viewClass(cid) {
+  app().innerHTML = '<div class="loading">載入中…</div>';
+  const d = await apiGet('/api/class/members', { cid });
+  const c = d.cls;
+  const i = (S.classes || []).findIndex(x => x.id === c.id);
+  if (i >= 0) { S.classes[i] = c; saveState(); }
+  const h = new Set(c.hidden || []);
+  app().innerHTML = `
+  <div class="pnav"><a class="btn" href="#/classes">← 班級列表</a><a class="btn" href="#/scoreboard" id="toSb">成績總表</a></div>
+  <div class="card"><div class="row"><h2 style="margin:0">${esc(c.name)}</h2>${c.archived ? '<span class="tag">已封存</span>' : ''}<span class="spacer"></span>
+      <input type="text" id="cName" value="${esc(c.name)}" style="width:200px"><button class="btn sm" id="cRename">改名</button>
+      <button class="btn sm ${c.archived ? '' : 'danger'}" id="cArchive">${c.archived ? '取消封存' : '封存班級'}</button></div>
+    <div class="join-box"><div>加入代碼<code class="jcode big">${esc(c.code)}</code></div>
+      <div><label><input type="checkbox" id="cJoin" ${c.allowJoin ? 'checked' : ''}> 開放學生用代碼自行加入</label><br>
+        <span class="muted small">學生用 Google 帳號登入 → 輸入代碼、座號、姓名。名單上已經有座號但沒有 Email 的，學生輸入相同的座號和姓名就會綁定（不需要開放也可以）。</span></div>
+      <button class="btn sm" id="cNewCode">換一個代碼</button></div></div>
+  <div class="problem-layout">
+    <div class="card"><h3 style="margin-top:0">學生名單（${d.members.length} 人）</h3>
+      ${d.members.length ? `<div class="table-wrap"><table class="list"><thead><tr><th>座號</th><th>姓名</th><th>Email</th><th>最近活動</th><th></th></tr></thead><tbody>
+        ${d.members.map(m => `<tr><td>${seat2(m.seat)}</td><td>${esc(m.name)}</td><td class="small">${m.email ? esc(m.email) : '<span class="muted">尚未綁定（學生可用代碼綁定）</span>'}</td>
+          <td class="small">${m.lastSeen ? `<span class="${Date.now() - m.lastSeen < 120000 ? 'online' : 'offline'}"></span>${fmtTime(m.lastSeen, true)}` : ''}</td>
+          <td><button class="btn sm danger" data-rm="${m.seat}">移除</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">還沒有學生。</p>'}
+    </div>
+    <div>
+      <div class="card"><h3 style="margin-top:0">匯入名單</h3>
+        <p class="muted small">從 Excel 複製「座號、姓名、Email」三欄貼上（Email 可以先不填，學生之後用代碼綁定）。同座號的會更新姓名與 Email。</p>
+        <textarea id="imp" rows="8" placeholder="1	王小明	s001@gmail.com&#10;2	李小華	s002@gmail.com&#10;3	陳大文"></textarea>
+        <div class="row" style="margin-top:6px"><span class="muted small" id="impPrev"></span><span class="spacer"></span><button class="btn primary" id="impGo">匯入</button></div></div>
+      <div class="card"><h3 style="margin-top:0">新增一位學生</h3>
+        <div class="row"><input type="number" id="oSeat" placeholder="座號" style="width:80px" value="${(d.members.reduce((a, m) => Math.max(a, m.seat), 0)) + 1}">
+          <input type="text" id="oName" placeholder="姓名" style="width:120px"><input type="text" id="oMail" placeholder="Email（可不填）" style="flex:1;min-width:160px">
+          <button class="btn" id="oGo">新增</button></div></div>
+      <div class="card"><h3 style="margin-top:0">本班開放的題目</h3>
+        <p class="muted small">取消勾選的系列或單元，這個班的學生就看不到、也不能送出。</p>
+        ${SERIES_KEYS.map(k => `<div class="open-series"><label><input type="checkbox" data-h="${k}" ${h.has(k) ? '' : 'checked'}> <b>${esc(DATA.series[k].name)}</b></label>
+          <div class="open-topics">${Object.entries(DATA.topics).filter(([, t]) => t.series === k).map(([tk, t]) => `<label><input type="checkbox" data-h="${tk}" ${h.has(tk) ? '' : 'checked'}> ${esc(t.name)}</label>`).join('')}</div></div>`).join('')}
+        <label style="display:block;margin-top:8px" class="small">另外要隱藏的題號（逗號分隔）：</label>
+        <input type="text" id="hideIds" style="width:100%" value="${esc([...h].filter(x => PMAP[x]).join(', '))}">
+        <div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn primary" id="saveOpen">儲存開放設定</button></div></div>
+    </div>
+  </div>`;
+  const update = async (body, msg) => {
+    try { const r = await api('/api/class/update', Object.assign({ cid }, body)); const k = (S.classes || []).findIndex(x => x.id === cid); if (k >= 0) S.classes[k] = r.cls; saveState(); toast(msg); viewClass(cid); }
+    catch (e) { toast(e.message); }
+  };
+  $('#toSb').onclick = () => store.set('cj-tcid', cid);
+  $('#cRename').onclick = () => update({ name: $('#cName').value.trim() }, '已改名');
+  $('#cArchive').onclick = () => { if (c.archived || confirm('封存後學生就不能再進入這個班級（成績資料會保留，之後可以取消封存）。確定嗎？')) update({ archived: !c.archived }, c.archived ? '已取消封存' : '已封存'); };
+  $('#cJoin').onchange = e => update({ allowJoin: e.target.checked }, e.target.checked ? '已開放自行加入' : '已關閉自行加入');
+  $('#cNewCode').onclick = () => { if (confirm('換代碼後，舊的代碼就不能用了。確定嗎？')) update({ newCode: true }, '已換新代碼'); };
+  $('#saveOpen').onclick = () => update({ hidden: $$('[data-h]').filter(x => !x.checked).map(x => x.dataset.h).concat($('#hideIds').value.split(/[,，\s]+/).map(s => s.trim().toLowerCase()).filter(x => PMAP[x])) }, '已儲存，學生下次同步時生效');
+  $('#imp').oninput = () => { const r = parseRoster($('#imp').value); $('#impPrev').textContent = r.length ? `讀到 ${r.length} 人：${r.slice(0, 3).map(x => x.seat + ' ' + x.name).join('、')}${r.length > 3 ? '…' : ''}` : ''; };
+  const save = async rows => {
+    try { const r = await api('/api/class/members/save', { cid, rows }); toast(`新增 ${r.added} 人、更新 ${r.updated} 人`); viewClass(cid); } catch (e) { toast(e.message, 4000); }
+  };
+  $('#impGo').onclick = () => { const rows = parseRoster($('#imp').value); if (!rows.length) { toast('沒有讀到資料，每一行要有座號'); return; } save(rows); };
+  $('#oGo').onclick = () => { if (!+$('#oSeat').value || !$('#oName').value.trim()) { toast('請輸入座號和姓名'); return; } save([{ seat: +$('#oSeat').value, name: $('#oName').value.trim(), email: $('#oMail').value.trim() }]); };
+  $$('[data-rm]').forEach(b => b.onclick = async () => {
+    if (!confirm(`確定要把座號 ${b.dataset.rm} 移出名單嗎？（成績會保留，重新加入同座號會恢復）`)) return;
+    try { await api('/api/class/members/remove', { cid, seat: +b.dataset.rm }); toast('已移除'); viewClass(cid); } catch (e) { toast(e.message); }
+  });
+}
+
+// ============ 系統管理（最高管理者） ============
+async function viewAdmin() {
+  app().innerHTML = '<div class="loading">載入中…</div>';
+  const d = await apiGet('/api/admin/overview');
+  const pending = d.users.filter(u => u.status === 'pending'), others = d.users.filter(u => u.status !== 'pending' && !d.admins.includes(u.email));
+  const ST = { active: '✔ 使用中', pending: '等待審核', rejected: '已拒絕', disabled: '已停用' };
+  app().innerHTML = `
+  <div class="card"><h2>系統管理</h2>
+    <div class="statgrid"><div class="stat"><b>${d.classes.length}</b><span>班級</span></div><div class="stat"><b>${d.classes.reduce((a, c) => a + c.count, 0)}</b><span>學生</span></div>
+      <div class="stat"><b>${others.filter(u => u.status === 'active').length}</b><span>老師</span></div><div class="stat"><b>${d.stats.submissions}</b><span>提交總數</span></div>
+      <div class="stat"><b>${PROBS.length}</b><span>題目</span></div></div>
+    ${S.serverVersion && S.serverVersion !== DATA.version ? `<div class="friendly"><b>注意：題目版本不一致。</b>網站的 problems.js 是 ${esc(DATA.version)}，Apps Script 的 Answers.gs 是 ${esc(S.serverVersion)}。</div>` : ''}
+    <div class="row"><a class="btn primary" href="#/edit/">＋ 新增題目</a><span class="muted small">在題目頁也可以按「編輯題目」或「測資與解答」。</span></div></div>
+  <div class="card"><h3 style="margin-top:0">老師帳號申請 ${pending.length ? `<span class="dot-badge">${pending.length}</span>` : ''}</h3>
+    ${pending.length ? `<div class="table-wrap"><table class="list"><thead><tr><th>姓名</th><th>學校</th><th>Email</th><th>備註</th><th>申請時間</th><th></th></tr></thead><tbody>
+      ${pending.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.school)}</td><td>${esc(u.email)}</td><td class="small">${esc(u.note)}</td><td class="small">${fmtTime(u.time)}</td>
+        <td><button class="btn sm green" data-st="active" data-em="${esc(u.email)}">核准</button> <button class="btn sm danger" data-st="rejected" data-em="${esc(u.email)}">拒絕</button></td></tr>`).join('')}</tbody></table></div>`
+      : '<p class="muted">目前沒有待審核的申請。（有新申請時會寄 Email 通知系統管理員）</p>'}</div>
+  <div class="card"><h3 style="margin-top:0">老師</h3>
+    <div class="table-wrap"><table class="list"><thead><tr><th>姓名</th><th>學校</th><th>Email</th><th>狀態</th><th>可以看測資與解答</th><th>班級</th><th></th></tr></thead><tbody>
+      ${d.admins.map(e => `<tr><td colspan="3">${esc(e)}</td><td>系統管理員</td><td>✔</td><td>${d.classes.filter(c => c.owner === e).length}</td><td></td></tr>`).join('')}
+      ${others.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.school)}</td><td>${esc(u.email)}</td><td>${ST[u.status] || esc(u.status)}</td>
+        <td><label><input type="checkbox" data-perm="${esc(u.email)}" ${u.perm === 'tests' ? 'checked' : ''} ${u.status === 'active' ? '' : 'disabled'}> 允許</label></td>
+        <td>${d.classes.filter(c => c.owner === u.email).length}</td>
+        <td>${u.status === 'active' ? `<button class="btn sm danger" data-st="disabled" data-em="${esc(u.email)}">停用</button>` : `<button class="btn sm" data-st="active" data-em="${esc(u.email)}">啟用</button>`}</td></tr>`).join('')}
+    </tbody></table></div></div>
+  <div class="card"><h3 style="margin-top:0">所有班級</h3>
+    <div class="table-wrap"><table class="list"><thead><tr><th>班級</th><th>老師</th><th>人數</th><th>加入代碼</th><th>建立時間</th></tr></thead><tbody>
+      ${d.classes.map(c => `<tr class="${c.archived ? 'muted' : ''}"><td><a href="#/class/${esc(c.id)}">${esc(c.name)}</a>${c.archived ? '（封存）' : ''}</td><td>${esc(c.ownerName)}</td><td>${c.count}</td><td><code>${esc(c.code)}</code></td><td class="small">${fmtTime(c.time)}</td></tr>`).join('')}
+    </tbody></table></div></div>`;
+  $$('[data-st]').forEach(b => b.onclick = async () => {
+    if (b.dataset.st !== 'active' && !confirm('確定嗎？')) return;
+    try { await api('/api/admin/teacher', { email: b.dataset.em, status: b.dataset.st }); toast('已更新'); viewAdmin(); } catch (e) { toast(e.message); }
+  });
+  $$('[data-perm]').forEach(cb => cb.onchange = async () => {
+    try { await api('/api/admin/teacher', { email: cb.dataset.perm, perm: cb.checked ? 'tests' : '' }); toast(cb.checked ? '已允許看測資與解答' : '已取消權限'); } catch (e) { toast(e.message); cb.checked = !cb.checked; }
+  });
+}
+
+// ============ 測資與解答（系統管理員、有權限的老師） ============
+const clip = (s, n = 3000) => s.length > n ? s.slice(0, n) + `\n…（共 ${s.length} 字，請按下載看完整內容）` : s;
+function downloadText(name, text) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+// 用參考解答跑出每組測資的正確輸出
+async function runSolution(solution, p, tests, onProgress) {
+  const c = await Judge.compile(solution);
+  if (!c.success) return { error: diagHtml(c.diags, 3) || esc(c.stderr) };
+  const outs = [];
+  for (let i = 0; i < tests.length; i++) {
+    onProgress && onProgress(i + 1, tests.length);
+    const t = tests[i];
+    const input = t.input !== undefined ? t.input : CJGen.runGen(t.gen, t.seed);
+    const r = await Judge.run(c.module, input, Math.max(5000, p.timeLimitMs || 1000));
+    outs.push({ input, status: r.status, output: normalize(r.stdout || ''), timeMs: r.timeMs, error: r.error ? friendlyRE(r) : '' });
+  }
+  return { outs };
+}
+async function viewTests(id) {
+  const p = PMAP[id];
+  if (!p) { app().innerHTML = '<div class="card">找不到題目</div>'; return; }
+  if (!S.user.canTests) { app().innerHTML = '<div class="card"><h2>沒有權限</h2><p>查看測資與解答需要系統管理員開放權限。</p></div>'; return; }
+  app().innerHTML = '<div class="loading">載入中…</div>';
+  const d = await apiGet('/api/problem-admin/' + id);
+  Judge.start().catch(() => { });
+  app().innerHTML = `
+  <div class="pnav"><a class="btn" href="#/problem/${id}">← 回到題目</a>${isAdmin() ? `<a class="btn" href="#/edit/${id}">✏ 編輯題目</a>` : ''}<span class="spacer"></span>${zoomButtons()}</div>
+  <div class="card"><div class="ptitle"><span class="pid">${id}</span><h2 style="margin:0">${esc(p.title)}：測資與解答</h2>${p.custom ? '<span class="tag">自訂</span>' : ''}</div>
+    <p class="muted small">共 ${p.tests.length} 組測資（每組 ${Math.floor(100 / p.tests.length)} 分左右）。「公開」的測資學生看得到（範例與答錯時的比對），「隱藏」的學生看不到。正確答案是用下面的參考解答在你的瀏覽器裡算出來的。</p>
+    <h3>參考解答</h3><div id="sol" class="readonly"></div>
+    <div class="row" style="margin-top:6px"><button class="btn" id="cpSol">📋 複製參考解答</button><button class="btn" id="dlAll">⬇ 下載全部測資（文字檔）</button><span class="muted small" id="runMsg"></span></div></div>
+  <div id="tlist"><div class="card loading">正在用參考解答計算正確答案…（第一次使用需要先下載編譯器）</div></div>`;
+  const cm = createEditor($('#sol'), d.solution || '（沒有參考解答）', { readOnly: true });
+  bindZoom(() => [cm, ...$$('#tlist pre')]);
+  $('#cpSol').onclick = async () => { try { await navigator.clipboard.writeText(d.solution || ''); toast('已複製'); } catch { toast('複製失敗'); } };
+  let result = null;
+  const r = await runSolution(d.solution || '', p, p.tests, (i, n) => { if ($('#runMsg')) $('#runMsg').textContent = `計算中 ${i} / ${n}`; });
+  if (!$('#tlist')) return;
+  if (r.error) { $('#tlist').innerHTML = `<div class="card"><div class="friendly"><b>參考解答編譯失敗：</b>${r.error}</div></div>`; return; }
+  result = r.outs;
+  $('#runMsg').textContent = '✔ 已算出全部正確答案';
+  $('#tlist').innerHTML = result.map((o, i) => `<div class="card test-card"><div class="row"><h3 style="margin:0">#${i + 1}</h3>
+      ${p.tests[i].public ? '<span class="tag">公開</span>' : '<span class="tag hid">隱藏</span>'}${p.tests[i].gen ? '<span class="tag">程式產生的大型測資</span>' : ''}
+      <span class="muted small">${p.tests[i].score || ''} 分 · 參考解答執行 ${o.timeMs} ms${o.status !== 'OK' ? ' · <b class="mine-tried">' + o.status + ' ' + esc(o.error) + '</b>' : ''}</span><span class="spacer"></span>
+      <button class="btn sm" data-dl="${i}" data-k="in">⬇ 輸入</button><button class="btn sm" data-dl="${i}" data-k="out">⬇ 正確輸出</button></div>
+    <div class="sample"><div class="box"><div class="h">輸入（${o.input.length} 字）</div><pre>${esc(clip(o.input)) || '<span class="muted">（無）</span>'}</pre></div>
+      <div class="box"><div class="h">正確輸出（${o.output.length} 字）</div><pre>${esc(clip(o.output))}</pre></div></div></div>`).join('');
+  bindZoom(() => [cm, ...$$('#tlist pre')]);
+  $$('[data-dl]').forEach(b => b.onclick = () => { const o = result[+b.dataset.dl]; downloadText(`${id}_${+b.dataset.dl + 1}.${b.dataset.k}.txt`, b.dataset.k === 'in' ? o.input : o.output + '\n'); });
+  $('#dlAll').onclick = () => downloadText(`${id}_全部測資.txt`, result.map((o, i) => `===== 第 ${i + 1} 組（${p.tests[i].public ? '公開' : '隱藏'}）輸入 =====\n${o.input}\n===== 第 ${i + 1} 組 正確輸出 =====\n${o.output}\n`).join('\n'));
+}
+
+// ============ 新增／編輯題目（系統管理員） ============
+async function viewEdit(id) {
+  if (!isAdmin()) { app().innerHTML = '<div class="card">只有系統管理員可以編輯題目。</div>'; return; }
+  const old = id ? PMAP[id] : null;
+  if (id && !old) { app().innerHTML = '<div class="card">找不到題目</div>'; return; }
+  app().innerHTML = '<div class="loading">載入中…</div>';
+  const d = old ? await apiGet('/api/problem-admin/' + id) : { solution: TEMPLATE };
+  Judge.start().catch(() => { });
+  const nextId = s => { let n = 1; while (PMAP[s + String(n).padStart(3, '0')]) n++; return s + String(n).padStart(3, '0'); };
+  const p = old ? JSON.parse(JSON.stringify(old)) : { id: nextId('a'), title: '', series: 'a', topic: 'a-mix', tags: [], difficulty: 1, timeLimitMs: 1000, content: '', inputDesc: '', outputDesc: '', hint: '', tests: [{ input: '', public: true }] };
+  let tests = p.tests.map(t => t.gen ? { gen: t.gen, seed: t.seed, public: false } : { input: t.input || '', public: !!t.public });
+  let gen = null;   // 用參考解答產生的答案：{ outputs, hashes }
+  const builtIn = old && BUILTIN.some(x => x.id === id);
+  app().innerHTML = `
+  <div class="pnav"><a class="btn" href="${old ? '#/problem/' + id : '#/admin'}">← ${old ? '回到題目' : '系統管理'}</a><span class="spacer"></span>
+    ${old && old.custom ? `<button class="btn danger" id="delP">${builtIn ? '↺ 恢復成內建的原始版本' : '🗑 刪除這一題'}</button>` : ''}</div>
+  <div class="card"><h2>${old ? '編輯題目 ' + esc(id) : '新增題目'}</h2>
+    ${builtIn ? '<p class="friendly">這是內建題目。儲存後會以你的版本取代內建版本（學生的成績保留）；之後可以按「恢復成內建的原始版本」。</p>' : ''}
+    <div class="form-grid">
+      <label>系列 / 單元</label><div class="row"><select id="eSeries">${SERIES_KEYS.map(k => `<option value="${k}" ${k === p.series ? 'selected' : ''}>${esc(DATA.series[k].name)}</option>`).join('')}</select><select id="eTopic"></select></div>
+      <label>題號</label><div class="row"><input type="text" id="eId" value="${esc(p.id)}" style="width:120px" ${old ? 'disabled' : ''}><span class="muted small">英文小寫開頭，例如 a101（建議用系列字母開頭）</span></div>
+      <label>題目名稱</label><input type="text" id="eTitle" value="${esc(p.title)}">
+      <label>難度 / 時間限制</label><div class="row"><select id="eDiff">${[1, 2, 3].map(n => `<option value="${n}" ${n === p.difficulty ? 'selected' : ''}>${'★'.repeat(n)}</option>`).join('')}</select>
+        <input type="number" id="eTime" value="${p.timeLimitMs}" style="width:90px"> 毫秒　標籤 <input type="text" id="eTags" value="${esc((p.tags || []).join(', '))}" placeholder="用逗號分隔" style="width:220px"></div>
+      <label>題目內容</label><textarea id="eContent" rows="5" style="font-family:inherit">${esc(p.content)}</textarea>
+      <label>輸入說明</label><textarea id="eIn" rows="2" style="font-family:inherit">${esc(p.inputDesc)}</textarea>
+      <label>輸出說明</label><textarea id="eOut" rows="2" style="font-family:inherit">${esc(p.outputDesc)}</textarea>
+      <label>提示</label><textarea id="eHint" rows="2" style="font-family:inherit">${esc(p.hint)}</textarea>
+      <label>參考解答<br><span class="muted small">學生看不到</span></label><div><div id="eSol"></div></div>
+    </div></div>
+  <div class="card"><div class="row"><h3 style="margin:0">測資</h3><span class="muted small">第 1 組和勾選「公開」的會當作範例給學生看；分數由系統平均分配（總分 100）。</span><span class="spacer"></span><button class="btn" id="addT">＋ 新增一組</button></div>
+    <div id="eTests"></div>
+    <div class="row" style="margin-top:12px"><button class="btn primary" id="genAns">▶ 用參考解答產生答案</button><span id="genMsg" class="small"></span><span class="spacer"></span>
+      <button class="btn green" id="saveP" disabled>💾 儲存題目</button></div></div>`;
+  const sol = createEditor($('#eSol'), d.solution || TEMPLATE, { onChange: () => { gen = null; showTests(); } });
+  sol.setSize(null, 300);
+  const fillTopic = () => {
+    const s = $('#eSeries').value;
+    $('#eTopic').innerHTML = Object.entries(DATA.topics).filter(([, t]) => t.series === s).map(([k, t]) => `<option value="${k}" ${k === p.topic ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
+    if (!old) { $('#eId').value = nextId(s); }
+  };
+  $('#eSeries').onchange = fillTopic; fillTopic();
+  const showTests = () => {
+    $('#eTests').innerHTML = tests.map((t, i) => `<div class="testcase2"><b>#${i + 1}</b>
+      <div><div class="small muted">輸入 <label><input type="checkbox" data-pub="${i}" ${t.public ? 'checked' : ''} ${t.gen ? 'disabled' : ''}> 公開</label></div>
+        ${t.gen ? `<div class="muted small genbox">程式產生的大型測資（只能在出題工具 tools 裡修改），種子 ${esc(t.seed)}</div>` : `<textarea data-in="${i}" rows="3">${esc(t.input)}</textarea>`}</div>
+      <div><div class="small muted">正確輸出 ${gen ? (gen.status[i] === 'OK' ? '<span class="mine-ac">✔</span>' : `<b class="mine-tried">${esc(gen.status[i])}</b>`) : '（按下方按鈕產生）'}</div>
+        <pre class="genout">${gen ? esc(clip(gen.outputs[i], 1500)) : ''}</pre></div>
+      <button class="btn sm danger" data-rm="${i}" title="刪除這組">✕</button></div>`).join('');
+    $$('[data-in]').forEach(el => el.oninput = () => { tests[+el.dataset.in].input = el.value; if (gen) { gen = null; $('#saveP').disabled = true; $('#genMsg').textContent = '測資改了，請重新產生答案'; } });
+    $$('[data-pub]').forEach(el => el.onchange = () => { tests[+el.dataset.pub].public = el.checked; });
+    $$('[data-rm]').forEach(b => b.onclick = () => { if (tests.length > 1) { tests.splice(+b.dataset.rm, 1); gen = null; showTests(); } });
+    $('#saveP').disabled = !gen || gen.status.some(s => s !== 'OK');
+  };
+  showTests();
+  $('#addT').onclick = () => { tests.push({ input: '', public: false }); gen = null; showTests(); };
+  $('#genAns').onclick = async () => {
+    const b = $('#genAns'); b.disabled = true; $('#genMsg').textContent = '編譯中…';
+    try {
+      const r = await runSolution(sol.getValue(), { timeLimitMs: +$('#eTime').value }, tests, (i, n) => $('#genMsg').textContent = `執行中 ${i} / ${n}`);
+      if (r.error) { $('#genMsg').innerHTML = '<span class="mine-tried">參考解答編譯失敗</span>' + r.error; gen = null; }
+      else {
+        gen = { outputs: r.outs.map(o => o.output), status: r.outs.map(o => o.status), hashes: await Promise.all(r.outs.map(o => sha(o.output))) };
+        const bad = gen.status.filter(s => s !== 'OK').length;
+        $('#genMsg').innerHTML = bad ? `<span class="mine-tried">有 ${bad} 組執行失敗，請修正參考解答</span>` : '<span class="mine-ac">✔ 已產生全部答案，請檢查後儲存</span>';
+      }
+    } catch (e) { $('#genMsg').textContent = e.message; }
+    b.disabled = false; showTests();
+  };
+  $('#saveP').onclick = async () => {
+    const problem = {
+      id: $('#eId').value.trim().toLowerCase(), title: $('#eTitle').value.trim(), series: $('#eSeries').value, topic: $('#eTopic').value,
+      tags: $('#eTags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean), difficulty: +$('#eDiff').value, timeLimitMs: +$('#eTime').value,
+      content: $('#eContent').value, inputDesc: $('#eIn').value, outputDesc: $('#eOut').value, hint: $('#eHint').value,
+      solution: sol.getValue(), tests, outputs: gen.outputs, hashes: gen.hashes,
+    };
+    if (!old && PMAP[problem.id]) { toast('題號已經存在'); return; }
+    const b = $('#saveP'); b.disabled = true;
+    try {
+      await api('/api/problems/save', { problem });
+      await backgroundSync(true);   // 下載新的題目資料
+      toast('已儲存，學生下次同步時就會看到'); location.hash = '#/problem/' + problem.id;
+    } catch (e) { toast(e.message, 4000); b.disabled = false; }
+  };
+  if ($('#delP')) $('#delP').onclick = async () => {
+    if (!confirm(builtIn ? '確定要恢復成內建的原始版本嗎？' : '確定要刪除這一題嗎？（學生的提交紀錄會保留）')) return;
+    try { await api('/api/problems/delete', { id }); await backgroundSync(true); toast('完成'); location.hash = builtIn ? '#/problem/' + id : '#/problems'; } catch (e) { toast(e.message); }
+  };
 }
 
 // ============ 啟動 ============
 if (S) {
-  Judge.start().catch(() => { });   // 已登入：一打開網頁就在背景準備編譯器
-  backgroundSync(false);
+  if (!isGuest()) Judge.start().catch(() => { });   // 已登入：一打開網頁就在背景準備編譯器
+  backgroundSync(S.schema !== 2);   // 舊版網頁留下的登入資料：立刻同步一次換成新格式（登入狀態保留）
   if (isTeacher()) setInterval(() => backgroundSync(true), 60000);   // 老師：每分鐘檢查新留言
 }
 router();

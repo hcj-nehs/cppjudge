@@ -167,6 +167,34 @@ li.CodeMirror-hint-active .hd { color: #e3eefc; }
 .offline { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #d0d5dc; margin-right: 4px; }
 .cls-tabs button { font-size: 16px; }
 
+/* 程式碼文字大小 */
+.zoom { display: inline-flex; align-items: center; gap: 2px; }
+.zoom .btn.sm { padding: 1px 8px; font-weight: 700; }
+.zoom-val { font-size: 12px; color: var(--muted); min-width: 22px; text-align: center; }
+/* 表單 */
+.form-grid { display: grid; grid-template-columns: 130px 1fr; gap: 8px 12px; align-items: center; }
+.form-grid > label { font-weight: 600; }
+.form-grid textarea, .form-grid input[type=text]:not([style*=width]) { width: 100%; }
+.dot-badge { display: inline-block; background: #ff5252; color: #fff; border-radius: 9px; font-size: 11px; line-height: 16px; padding: 0 6px; vertical-align: middle; }
+/* 班級 */
+.jcode { font-family: var(--mono); background: #eef2f7; border-radius: 5px; padding: 1px 8px; letter-spacing: 2px; font-weight: 700; color: var(--brand); }
+.jcode.big { font-size: 26px; display: block; margin-top: 4px; letter-spacing: 4px; }
+.join-box { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; background: #f6f9fd; border: 1px solid var(--line); border-radius: 9px; padding: 12px 16px; margin-top: 12px; }
+.join-box > div:nth-child(2) { flex: 1; min-width: 240px; }
+/* 成績換算 */
+.grade-box { margin-top: 12px; background: #f6f9fd; border: 1px solid #c8dcf5; border-radius: 9px; }
+.grade-box summary { cursor: pointer; padding: 8px 12px; font-weight: 700; color: var(--brand); }
+.grade-grid { display: grid; grid-template-columns: 140px 1fr; gap: 8px 12px; align-items: center; padding: 0 14px; }
+.grade-box p { padding: 0 14px; }
+/* 測資與題目編輯 */
+.tag.hid { background: #f3e8ff; color: #6b21a8; }
+.test-card .sample pre { max-height: 260px; overflow: auto; }
+.testcase2 { display: grid; grid-template-columns: 34px 1fr 1fr 36px; gap: 8px; align-items: start; border-top: 1px dashed var(--line); padding: 8px 0; }
+.testcase2 textarea { height: 90px; }
+.genout { margin: 0; background: #f6f8fa; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-height: 90px; max-height: 160px; overflow: auto; font-family: var(--mono); font-size: 13px; white-space: pre-wrap; }
+.genbox { background: #f6f8fa; border-radius: 6px; padding: 8px; }
+@media (max-width: 700px) { .form-grid, .grade-grid { grid-template-columns: 1fr; } .testcase2 { grid-template-columns: 1fr; } }
+
 /* 管理 */
 .open-series { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin: 8px 0; }
 .open-topics { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 6px 0 0 24px; font-size: 14px; }
