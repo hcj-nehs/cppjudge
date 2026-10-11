@@ -12,6 +12,9 @@ const CFG = window.CJ_CONFIG || {};
 const DATA = window.CJ_DATA || { problems: [], series: {}, topics: {} };
 const PROBS = DATA.problems;
 const PMAP = Object.fromEntries(PROBS.map(p => [p.id, p]));
+// 老師為班級新增的題目放在「班級題目」系列
+if (!DATA.series.x) DATA.series.x = { name: '班級題目', desc: '老師為你們班新增的題目', timeLimitMs: 1000 };
+if (!DATA.topics['x-class']) DATA.topics['x-class'] = { name: '老師新增的題目', series: 'x', text: '這些是老師為你們班新增的題目。\n\n解題方法和其他題目一樣：讀取輸入、計算、輸出答案。不會寫的時候，可以先複習前面單元的語法說明。' };
 const SERIES_KEYS = Object.keys(DATA.series);
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -464,8 +467,8 @@ async function router() {
   if (isGuest() && !['welcome', 'login'].includes(page)) { location.hash = '#/welcome'; return; }
   if (!isGuest() && page === 'welcome') { location.hash = '#/problems'; return; }
   if (['scoreboard', 'classes', 'class'].includes(page) && !isTeacher()) { location.hash = '#/problems'; return; }
-  if (['admin', 'edit'].includes(page) && !isAdmin()) { location.hash = '#/problems'; return; }
-  if (page === 'tests' && !(S.user && S.user.canTests)) { location.hash = '#/problems'; return; }
+  if (page === 'admin' && !isAdmin()) { location.hash = '#/problems'; return; }
+  if (['edit', 'tests'].includes(page) && !isTeacher()) { location.hash = '#/problems'; return; }
   try { await v(decodeURIComponent(arg)); }
   catch (e) {
     app().innerHTML = `<div class="card"><div class="err">${esc(e.message)}</div><button class="btn primary" id="retryPage" style="margin-top:10px">↻ 重新載入</button></div>`;
@@ -590,14 +593,41 @@ function viewWelcome() {
 
 // ============ 題目列表 ============
 function myStat(p) { return isTeacher() ? null : (S.mine || {})[p.id] || null; }
+const ownsProblem = p => isTeacher() && !!p.custom && p.owner === S.user.email;
+// 學生的答題狀態：✔ 已完成／✘ 未通過／○ 尚未作答
+const stateOf = p => { const m = myStat(p); return !m ? 'none' : m.ac ? 'ac' : 'wa'; };
 function statusCell(p) {
   const m = myStat(p);
-  if (!m) return '<span class="muted">—</span>';
+  if (!m) return '<span class="st st-none">○ 尚未作答</span>';
   if (m.ac) {
     const rk = rankOf(p.id);
-    return `<span class="mine-ac">✔ 通過</span>${rk ? ' ' + rankBadge(rk) : ''}`;
+    return `<span class="st st-ac">✔ 已完成</span>${rk ? ' ' + rankBadge(rk) : ''}`;
   }
-  return `<span class="mine-tried">✘ ${m.best} 分</span> <span class="muted small">(${m.tries} 次)</span>`;
+  return `<span class="st st-wa">✘ 未通過</span> <span class="muted small">最高 ${m.best} 分・送出 ${m.tries} 次</span>`;
+}
+// 老師設定的「各單元要完成的題數」與「指定必做題」
+const unitGoals = () => (!isTeacher() && S.klass && S.klass.goals) || {};
+const requiredSet = () => new Set((!isTeacher() && S.klass && S.klass.required) || []);
+const isRequired = p => requiredSet().has(p.id);
+// 單元目標：指定必做題都要完成，而且完成題數達到目標（目標比必做題少時，以必做題數為準）
+function goalRule(topic, goals, required, probs) {
+  const all = probs.filter(p => p.topic === topic);
+  const req = all.filter(p => required.has(p.id)).map(p => p.id);
+  const goal = Math.min(Math.max(+goals[topic] || 0, req.length), all.length);
+  return { all, req, goal };
+}
+// timeOf(pid) → 首次通過時間（沒通過 = 0）
+function goalStatus(rule, timeOf) {
+  const times = rule.all.map(p => timeOf(p.id)).filter(Boolean).sort((a, b) => a - b);
+  const done = times.length, reqTimes = rule.req.map(timeOf), reqDone = reqTimes.filter(Boolean).length;
+  const met = rule.goal > 0 && reqDone === rule.req.length && done >= rule.goal;
+  const progress = Math.min(rule.goal, reqDone + Math.min(done - reqDone, rule.goal - rule.req.length));
+  return { done, goal: rule.goal, req: rule.req, reqDone, met, progress, extra: met ? done - rule.goal : 0,
+    reach: met ? Math.max(times[rule.goal - 1], ...reqTimes) : 0 };
+}
+function unitProgress(topic, probs) {
+  const rule = goalRule(topic, unitGoals(), requiredSet(), probs);
+  return Object.assign({ all: rule.all }, goalStatus(rule, pid => { const m = (S.mine || {})[pid]; return m && m.ac ? m.firstAC || 1 : 0; }));
 }
 function rankOf(pid) {
   const list = (S.ranks || {})[pid] || [];
@@ -611,36 +641,62 @@ function viewProblems() {
   if (!series.includes(cur)) cur = series[0];
   const onlyTodo = store.get('cj-todo') === '1';
   const acCount = list => list.filter(p => myStat(p) && myStat(p).ac).length;
+  // 學生：有設定目標的單元（依系列、單元順序）
+  const goalUnits = isTeacher() ? [] : Object.keys(DATA.topics).map(t => Object.assign({ t }, unitProgress(t, probs))).filter(u => u.goal > 0);
+  const metCount = goalUnits.filter(u => u.met).length;
+  const reqList = probs.filter(isRequired), reqDone = reqList.filter(p => stateOf(p) === 'ac').length;
+  const need = u => {   // 還差什麼
+    const r = u.req.length - u.reqDone, more = Math.max(0, u.goal - u.done);
+    return [r ? `必做題還差 ${r} 題` : '', more > r ? `總題數還差 ${more} 題` : ''].filter(Boolean).join('、');
+  };
   app().innerHTML = `
+    ${goalUnits.length || reqList.length ? `<div class="card goal-card"><div class="row"><h3 style="margin:0">📋 我的完成目標</h3>
+        ${goalUnits.length ? `<span class="${metCount === goalUnits.length ? 'mine-ac' : 'muted'}">已達成 ${metCount} / ${goalUnits.length} 個單元</span>` : ''}
+        <span class="muted small">每個單元要完成老師指定的題數（⭐ 必做題一定要完成），達到目標就算完成這個單元。</span></div>
+      ${reqList.length ? `<div class="req-box"><div class="row"><b>⭐ 老師指定必做題</b><span class="${reqDone === reqList.length ? 'mine-ac' : 'mine-tried'}">已完成 ${reqDone} / ${reqList.length} 題</span>
+          ${reqDone < reqList.length ? '<span class="muted small">（灰色、紅色的還沒完成，點一下就可以去寫）</span>' : '<span class="mine-ac">🎉 全部完成！</span>'}</div>
+        <div class="req-chips">${reqList.map(p => `<a class="req-chip ${stateOf(p)}" href="#/problem/${p.id}">${stateOf(p) === 'ac' ? '✔' : stateOf(p) === 'wa' ? '✘' : '○'} ${p.id} ${esc(p.title)}</a>`).join('')}</div></div>` : ''}
+      ${goalUnits.length ? `<div class="goal-list">${goalUnits.map(u => `<a href="javascript:void 0" class="goal ${u.met ? 'met' : ''}" data-unit="${u.t}">
+        <b>${esc(DATA.topics[u.t].name)}</b><span class="small muted">${esc(DATA.series[DATA.topics[u.t].series].name)}・目標 ${u.goal} 題${u.req.length ? `（含 ⭐ 必做 ${u.req.length} 題）` : ''}</span>
+        <span class="bar"><i style="width:${Math.min(100, u.progress / u.goal * 100)}%"></i></span>
+        <span class="small">${u.met ? `✔ 已達成（完成 ${u.done} 題${u.extra ? `，多做 ${u.extra} 題` : ''}）` : `已完成 ${u.done} 題，<b class="mine-tried">${need(u)}</b>`}</span></a>`).join('')}</div>` : ''}</div>` : ''}
     <div class="card">
       <div class="series-tabs">${series.map(k => {
         const list = probs.filter(p => p.series === k), ac = acCount(list);
+        const gs = goalUnits.filter(u => DATA.topics[u.t].series === k), gm = gs.filter(u => u.met).length;
         return `<button data-s="${k}" class="${k === cur ? 'on' : ''}"><b>${esc(DATA.series[k].name)}</b>
           <span class="small">${esc(DATA.series[k].desc)}</span>
           ${isTeacher() ? `<span class="small muted">${list.length} 題${list.filter(isHidden).length ? `（${list.filter(isHidden).length} 題隱藏）` : ''}</span>`
-            : `<span class="bar"><i style="width:${list.length ? ac / list.length * 100 : 0}%"></i></span><span class="small">已通過 ${ac} / ${list.length}</span>`}</button>`;
+            : `<span class="bar"><i style="width:${list.length ? ac / list.length * 100 : 0}%"></i></span><span class="small">已完成 ${ac} / ${list.length} 題${gs.length ? `　目標單元 ${gm} / ${gs.length}` : ''}</span>`}</button>`;
       }).join('')}</div>
       <div class="row" style="margin-top:12px">
         <input type="text" id="q" placeholder="搜尋題號、題目、標籤…" style="width:240px">
-        ${isTeacher() ? '' : `<label class="small"><input type="checkbox" id="todo" ${onlyTodo ? 'checked' : ''}> 只顯示還沒通過的</label>`}
+        ${isTeacher() ? '' : `<label class="small"><input type="checkbox" id="todo" ${onlyTodo ? 'checked' : ''}> 只顯示還沒完成的</label>
+          ${reqList.length ? `<label class="small"><input type="checkbox" id="onlyReq" ${store.get('cj-onlyreq') === '1' ? 'checked' : ''}> 只顯示 ⭐ 必做題</label>` : ''}
+          <span class="small legend"><span class="st st-ac">✔ 已完成</span><span class="st st-wa">✘ 未通過</span><span class="st st-none">○ 尚未作答</span></span>`}
         <span class="spacer"></span>
+        ${isTeacher() ? '<a class="btn primary" href="#/edit/">＋ 新增班級題目</a>' : ''}
         ${!isTeacher() && S.syncedAt ? `<span class="muted small">本班資料更新於 ${fmtTime(S.syncedAt, true)}</span>` : ''}
       </div>
     </div>
     <div id="plist"></div>`;
   const render = () => {
-    const q = ($('#q').value || '').trim().toLowerCase(), todo = $('#todo') && $('#todo').checked;
-    const list = probs.filter(p => p.series === cur && (!q || (p.id + p.title + p.tags.join(' ') + DATA.topics[p.topic].name).toLowerCase().includes(q)) && (!todo || !(myStat(p) && myStat(p).ac)));
+    const q = ($('#q').value || '').trim().toLowerCase(), todo = $('#todo') && $('#todo').checked, onlyReq = $('#onlyReq') && $('#onlyReq').checked;
+    const list = probs.filter(p => p.series === cur && (!q || (p.id + p.title + p.tags.join(' ') + DATA.topics[p.topic].name).toLowerCase().includes(q))
+      && (!todo || !(myStat(p) && myStat(p).ac)) && (!onlyReq || isRequired(p)));
     const topics = [...new Set(list.map(p => p.topic))];
     $('#plist').innerHTML = topics.map(t => {
-      const tl = list.filter(p => p.topic === t), all = probs.filter(p => p.topic === t);
-      return `<div class="card"><div class="row" style="margin-bottom:8px"><h3 style="margin:0">${esc(DATA.topics[t].name)}</h3>
-        <span class="muted small">${isTeacher() ? `${all.length} 題${isHidden({ id: '', series: '', topic: t }) ? ' · <b class="mine-tried">隱藏中</b>' : ''}` : `已通過 ${acCount(all)} / ${all.length}`}</span></div>
+      const tl = list.filter(p => p.topic === t), all = probs.filter(p => p.topic === t), u = unitProgress(t, probs);
+      const wa = all.filter(p => stateOf(p) === 'wa').length, none = all.filter(p => stateOf(p) === 'none').length;
+      return `<div class="card" id="unit-${t}"><div class="row" style="margin-bottom:8px"><h3 style="margin:0">${esc(DATA.topics[t].name)}</h3>
+        ${isTeacher() ? `<span class="muted small">${all.length} 題${isHidden({ id: '', series: '', topic: t }) ? ' · <b class="mine-tried">隱藏中</b>' : ''}</span>`
+          : `${u.goal ? `<span class="unit-goal ${u.met ? 'met' : ''}">${u.met ? '✔ 已達成目標' : `目標 ${u.goal} 題${u.req.length ? `（⭐ 必做 ${u.req.length}）` : ''}・${need(u)}`}</span>` : ''}
+             <span class="small">已完成 <b class="mine-ac">${u.done}</b> / ${all.length}${wa ? `・<span class="mine-tried">未通過 ${wa}</span>` : ''}${none ? `・<span class="muted">尚未作答 ${none}</span>` : ''}</span>`}</div>
         <div class="table-wrap"><table class="list plist"><thead><tr><th style="width:64px">題號</th><th>題目</th><th style="width:80px">難度</th>
-          ${isTeacher() ? '<th style="width:90px">狀態</th>' : '<th style="width:110px">本班通過</th><th style="width:220px">我的狀態</th>'}</tr></thead><tbody>
-        ${tl.map(p => `<tr data-go="${p.id}" class="${myStat(p) && myStat(p).ac ? 'done' : ''}">
+          ${isTeacher() ? '<th style="width:90px">狀態</th>' : '<th style="width:100px">本班完成</th><th style="width:260px">我的狀態</th>'}</tr></thead><tbody>
+        ${tl.map(p => `<tr data-go="${p.id}" class="${isTeacher() ? '' : 'row-' + stateOf(p)}">
           <td class="pid">${p.id}</td>
-          <td><a href="#/problem/${p.id}"><b>${esc(p.title)}</b></a> ${p.tags.slice(0, 3).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</td>
+          <td>${isRequired(p) ? '<span class="req-tag" title="老師指定一定要完成">⭐ 必做</span> ' : ''}<a href="#/problem/${p.id}"><b>${esc(p.title)}</b></a> ${p.tags.slice(0, 3).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</td>
           <td>${stars(p.difficulty)}</td>
           ${isTeacher() ? `<td>${isHidden(p) ? '<span class="muted">隱藏</span>' : '公開'}</td>`
             : `<td>${((S.cls || {})[p.id] || {}).ac || 0} 人</td><td>${statusCell(p)}</td>`}
@@ -651,7 +707,14 @@ function viewProblems() {
   $$('.series-tabs button').forEach(b => b.onclick = () => { cur = b.dataset.s; store.set('cj-series', cur); $$('.series-tabs button').forEach(x => x.classList.toggle('on', x === b)); render(); });
   $('#q').oninput = render;
   if ($('#todo')) $('#todo').onchange = () => { store.set('cj-todo', $('#todo').checked ? '1' : '0'); render(); };
+  if ($('#onlyReq')) $('#onlyReq').onchange = () => { store.set('cj-onlyreq', $('#onlyReq').checked ? '1' : '0'); render(); };
   render();
+  // 點目標卡片：切換到那個系列並捲到那個單元
+  $$('[data-unit]').forEach(a => a.onclick = () => {
+    const t = a.dataset.unit, s = DATA.topics[t].series;
+    if (s !== cur) $(`.series-tabs button[data-s="${s}"]`).click();
+    const el = $('#unit-' + t); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
 }
 
 // ============ 題目頁（解題） ============
@@ -724,9 +787,9 @@ async function viewProblem(id) {
   <div class="problem-layout">
     <div>
       <div class="card">
-        <div class="ptitle"><span class="pid">${p.id}</span><h2 style="margin:0">${esc(p.title)}</h2>${myStat(p) && myStat(p).ac ? '<span class="mine-ac">✔ 已通過</span>' : ''}
+        <div class="ptitle"><span class="pid">${p.id}</span><h2 style="margin:0">${esc(p.title)}</h2>${isTeacher() ? '' : (isRequired(p) ? '<span class="req-tag">⭐ 老師指定必做</span> ' : '') + statusCell(p)}
           ${p.custom ? '<span class="tag">自訂</span>' : ''}<span class="spacer"></span>
-          ${S.user.canTests ? `<a class="btn sm" href="#/tests/${p.id}">🔍 測資與解答</a>` : ''}${isAdmin() ? ` <a class="btn sm" href="#/edit/${p.id}">✏ 編輯題目</a>` : ''}</div>
+          ${S.user.canTests || ownsProblem(p) ? `<a class="btn sm" href="#/tests/${p.id}">🔍 測資與解答</a>` : ''}${isAdmin() || ownsProblem(p) ? ` <a class="btn sm" href="#/edit/${p.id}">✏ 編輯題目</a>` : ''}</div>
         <div class="muted small" style="margin:4px 0 10px">${esc(DATA.series[p.series].name)} · ${esc(topic.name)} · ${stars(p.difficulty)} · 時間限制 ${p.timeLimitMs / 1000} 秒 · ${p.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
         <details class="lesson" ${store.get('cj-lesson-' + p.topic) === 'open' ? 'open' : ''}><summary>📘 語法說明：${esc(topic.name)}</summary><div class="lesson-body">${renderLesson(topic.text)}</div></details>
         <h3>題目內容</h3><div class="pbody">${esc(p.content)}</div>
@@ -1128,6 +1191,26 @@ function gradeOf(cell, n, cfg) {
   if (cell[2] && cell[4]) bonus = cfg.mode === 'linear' ? (n <= 1 ? cfg.bonus : cfg.bonus * (n - cell[4]) / (n - 1)) : Math.max(0, cfg.bonus - (cell[4] - 1) * cfg.step);
   return Math.round((+cfg.base + bonus) * 10) / 10;
 }
+// 單元成績：完成題數達到老師設定的目標 → 基本分；再依「本班達到目標的時間」名次加分
+function unitScores(students, goals, cfg, required) {
+  const req = new Set(required || []);
+  const units = Object.keys(DATA.topics).filter(t => goalRule(t, goals, req, PROBS).goal > 0);
+  const res = students.map(() => ({}));
+  for (const t of units) {
+    const rule = goalRule(t, goals, req, PROBS);
+    const info = students.map(r => Object.assign({ rank: 0 }, goalStatus(rule, pid => r.cells[pid] ? r.cells[pid][2] : 0)));
+    const met = info.filter(x => x.met).sort((a, b) => a.reach - b.reach);
+    met.forEach((x, i) => x.rank = i + 1);
+    info.forEach((x, i) => {
+      // 達標：基本分 + 名次加分 + 超過目標的題目加分（不超過單元最高分）；沒達標：依進度比例或 0 分
+      x.score = x.met ? Math.min(cfg.cap, Math.round((gradeOf([100, 1, 1, 0, x.rank], met.length, cfg) + x.extra * cfg.extra) * 10) / 10)
+        : cfg.partial === 'zero' ? 0 : Math.round(cfg.base * x.progress / x.goal * 10) / 10;
+      res[i][t] = x;
+    });
+  }
+  const avg = i => units.length ? Math.round(units.reduce((a, t) => a + res[i][t].score, 0) / units.length * 10) / 10 : 0;
+  return { units, res, avg };
+}
 async function viewScoreboard() {
   if (!teacherClasses().length) { app().innerHTML = '<div class="card"><h2>成績總表</h2><p>你還沒有班級，請先到 <a href="#/classes">班級管理</a> 建立班級。</p></div>'; return; }
   let cid = teacherCid();
@@ -1142,23 +1225,28 @@ async function viewScoreboard() {
     <div class="tabs cls-tabs" id="clsTabs" style="margin:12px 0 0">${teacherClasses().map(c => `<button data-c="${esc(c.id)}" class="${c.id === cid ? 'on' : ''}">${esc(c.name)}</button>`).join('')}</div>
     <div class="row" style="margin-top:8px">系列：<select id="sbSeries">${SERIES_KEYS.map(k => `<option value="${k}" ${k === series ? 'selected' : ''}>${esc(DATA.series[k].name)}</option>`).join('')}</select>
       單元：<select id="sbTopic"></select>
-      顯示：<select id="sbMode"><option value="raw" ${mode === 'raw' ? 'selected' : ''}>原始分數</option><option value="grade" ${mode === 'grade' ? 'selected' : ''}>換算成績</option></select>
+      顯示：<select id="sbMode"><option value="raw" ${mode === 'raw' ? 'selected' : ''}>原始分數</option><option value="grade" ${mode === 'grade' ? 'selected' : ''}>每題換算成績</option><option value="unit" ${mode === 'unit' ? 'selected' : ''}>單元成績（依單元目標題數）</option></select>
       <span class="muted small">綠＝通過、橘＝部分得分、紅＝0 分；點格子看最後一次的程式碼。<span class="online"></span>＝2 分鐘內有活動</span></div>
-    <details class="grade-box" ${mode === 'grade' ? 'open' : ''}><summary>📊 成績換算設定（有做的給基本分，通過的再依完成名次加分）</summary>
+    <details class="grade-box" ${mode !== 'raw' ? 'open' : ''}><summary>📊 成績換算設定（完成的給基本分，再依完成名次加分）</summary>
       <div class="grade-grid">
-        <label>怎樣算「有做」</label><select id="gCond"><option value="ac">通過（AC）</option><option value="score">有得分（部分正確也算）</option><option value="tried">有送出就算</option></select>
+        <label>單元成績：額外題目</label><div>超過目標的題目，每多完成 1 題加 <input type="number" id="gExtra" min="0" max="100" step="0.5" style="width:70px"> 分；每個單元最高 <input type="number" id="gCap" min="0" max="1000" style="width:80px"> 分</div>
+        <label>單元成績：沒達到目標</label><select id="gPartial"><option value="ratio">依完成比例給基本分（例：目標 5 題做了 3 題 → 基本分 × 3/5）</option><option value="zero">0 分</option></select>
+        <label>每題換算：怎樣算「有做」</label><select id="gCond"><option value="ac">通過（AC）</option><option value="score">有得分（部分正確也算）</option><option value="tried">有送出就算</option></select>
         <label>有做的基本分</label><input type="number" id="gBase" min="0" max="100" style="width:90px">
         <label>名次加分最多</label><input type="number" id="gBonus" min="0" max="100" style="width:90px">
         <label>名次加分方式</label><div><select id="gMode"><option value="linear">依名次比例：第 1 名加滿分，最後一位通過的加 0 分</option><option value="step">每差一名少幾分</option></select>
           <span id="gStepBox">　每名少 <input type="number" id="gStep" min="0" max="100" step="0.5" style="width:70px"> 分（最少 0 分）</span></div>
       </div>
       <p class="muted small" id="gExample"></p>
-      <p class="muted small">名次依「本班第一次通過的時間」排序；只有通過（AC）的同學有名次加分。每一題換算後最高 ${'<b id="gMax"></b>'} 分，「平均」是目前選擇範圍內所有題目的平均。</p>
+      <p class="muted small">每題換算：名次依「本班第一次通過這一題的時間」排序，只有通過的同學有名次加分，「平均」是目前選擇範圍內所有題目的平均。<br>
+        單元成績：只計算有設定「目標題數」的單元（在 <a href="#/class/${esc(cid)}">班級管理</a> 設定）。完成題數達到目標 → 基本分；名次依「本班達到目標的時間」排序加分；超過目標的題目每題再加分（不超過單元最高分）；「平均」是所有目標單元的平均。每題換算最高 <b id="gMax"></b> 分。</p>
     </details></div>
     <div id="sb"><div class="card loading">載入中…</div></div>`;
-  $('#gCond').value = cfg.cond; $('#gBase').value = cfg.base; $('#gBonus').value = cfg.bonus; $('#gMode').value = cfg.mode; $('#gStep').value = cfg.step;
+  $('#gCond').value = cfg.cond; $('#gBase').value = cfg.base; $('#gBonus').value = cfg.bonus; $('#gMode').value = cfg.mode; $('#gStep').value = cfg.step; $('#gPartial').value = cfg.partial || 'ratio';
+  $('#gExtra').value = cfg.extra ?? 5; $('#gCap').value = cfg.cap ?? 100;
   const readCfg = () => {
-    const c = { cond: $('#gCond').value, base: +$('#gBase').value || 0, bonus: +$('#gBonus').value || 0, mode: $('#gMode').value, step: +$('#gStep').value || 0 };
+    const c = { cond: $('#gCond').value, base: +$('#gBase').value || 0, bonus: +$('#gBonus').value || 0, mode: $('#gMode').value, step: +$('#gStep').value || 0, partial: $('#gPartial').value,
+      extra: +$('#gExtra').value || 0, cap: $('#gCap').value === '' ? 100 : +$('#gCap').value };
     store.set('cj-grade', JSON.stringify(c));
     $('#gStepBox').style.display = c.mode === 'step' ? '' : 'none';
     $('#gMax').textContent = c.base + c.bonus;
@@ -1179,6 +1267,11 @@ async function viewScoreboard() {
   // 表格資料（下載與寫入 Google Sheet 共用）
   const tableRows = () => {
     const ps = probsNow(), c = readCfg(), cls = last.cls.name;
+    if (mode === 'unit') {
+      const u = unitScores(last.students, last.cls.goals || {}, c, last.cls.required);
+      const head = ['班級', '座號', '姓名', 'Email', ...u.units.flatMap(t => [`${DATA.topics[t].name} 完成題數（目標 ${u.res[0] ? u.res[0][t].goal : ''}）`, `${DATA.topics[t].name} 成績`]), '達到目標的單元數', `單元平均（每單元 ${c.base + c.bonus} 分）`];
+      return [head, ...last.students.map((r, i) => [cls, r.seat, r.name, r.email, ...u.units.flatMap(t => [u.res[i][t].done, u.res[i][t].score]), u.units.filter(t => u.res[i][t].met).length, u.avg(i)])];
+    }
     const n = Object.fromEntries(ps.map(p => [p.id, acCountOf(p.id)]));
     const head = ['班級', '座號', '姓名', 'Email', ...ps.map(p => `${p.id} ${p.title}`), '通過題數', '原始總分', `換算平均（每題 ${c.base + c.bonus} 分）`, '換算總分'];
     const rows = last.students.map(r => {
@@ -1194,7 +1287,7 @@ async function viewScoreboard() {
     const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['﻿' + tableRows().map(r => r.map(q).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' }));
-    a.download = `成績_${last.cls.name}_${DATA.series[series].name}${topic ? '_' + DATA.topics[topic].name : ''}_${mode === 'grade' ? '換算' : '原始'}.csv`;
+    a.download = `成績_${last.cls.name}_${DATA.series[series].name}${topic ? '_' + DATA.topics[topic].name : ''}_${{ grade: '每題換算', unit: '單元成績', raw: '原始分數' }[mode]}.csv`;
     a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
   $('#toSheet').onclick = async () => {
@@ -1204,8 +1297,21 @@ async function viewScoreboard() {
     b.disabled = false;
   };
   const online = t => t && Date.now() - t < 120000;
+  const renderUnit = () => {
+    const rows = last.students, c = readCfg(), u = unitScores(rows, last.cls.goals || {}, c, last.cls.required);
+    if (!u.units.length) { $('#sb').innerHTML = `<div class="card"><div class="friendly"><b>這個班級還沒有設定單元目標。</b>請到 <a href="#/class/${esc(cid)}">班級管理</a> 的「本班開放的題目與單元目標」，填寫每個單元要完成幾題。</div></div>`; return; }
+    $('#sb').innerHTML = !rows.length ? '<div class="card">這個班級還沒有學生。</div>' : `<div class="card"><div class="row" style="margin-bottom:8px"><h2 style="margin:0">${esc(last.cls.name)}　單元成績</h2>
+      <span class="muted">${rows.length} 人 · ${u.units.length} 個目標單元 · 全部達標 ${rows.filter((r, i) => u.units.every(t => u.res[i][t].met)).length} 人</span></div>
+    <div class="table-wrap"><table class="list sb unit-sb"><thead><tr><th class="name">座號</th><th class="name">姓名</th><th>達標</th><th>單元平均</th>
+      ${u.units.map(t => `<th class="u">${esc(DATA.topics[t].name)}<br><span class="muted small">目標 ${u.res[0][t].goal} 題</span></th>`).join('')}</tr></thead><tbody>
+      ${rows.map((r, i) => `<tr><td class="name">${seat2(r.seat)}</td><td class="name"><span class="${online(r.lastSeen) ? 'online' : 'offline'}"></span>${esc(r.name)}</td>
+        <td><b>${u.units.filter(t => u.res[i][t].met).length}</b> / ${u.units.length}</td><td><b>${u.avg(i)}</b></td>
+        ${u.units.map(t => { const x = u.res[i][t]; return `<td><span class="cell ${x.met ? 'ac' : x.done ? 'part' : 'zero'}" title="${esc(DATA.topics[t].name)}｜完成 ${x.done} / 目標 ${x.goal} 題${x.req.length ? '｜⭐ 必做完成 ' + x.reqDone + ' / ' + x.req.length : ''}${x.extra ? '（多做 ' + x.extra + ' 題）' : ''}${x.met ? '｜達標時間 ' + fmtTime(x.reach) + '｜本班第 ' + x.rank + ' 位達標' : ''}">${x.score}<small>${x.done}/${x.goal}${x.extra ? ' +' + x.extra : ''}${x.met ? ' · #' + x.rank : ''}</small></span></td>`; }).join('')}</tr>`).join('')}
+      </tbody><tfoot><tr><th class="name" colspan="4">達標人數</th>${u.units.map(t => `<th>${rows.filter((r, i) => u.res[i][t].met).length}</th>`).join('')}</tr></tfoot></table></div></div>`;
+  };
   const render = () => {
     if (!last || !$('#sb')) return;
+    if (mode === 'unit') return renderUnit();
     const ps = probsNow(), rows = last.students, c = readCfg();
     const n = Object.fromEntries(ps.map(p => [p.id, acCountOf(p.id)]));
     const acs = r => ps.filter(p => r.cells[p.id] && r.cells[p.id][2]).length;
@@ -1240,8 +1346,8 @@ async function viewScoreboard() {
   $$('#clsTabs button').forEach(b => b.onclick = () => { cid = b.dataset.c; store.set('cj-tcid', cid); $$('#clsTabs button').forEach(x => x.classList.toggle('on', x === b)); last = null; $('#sb').innerHTML = '<div class="card loading">載入中…</div>'; load(true); });
   $('#sbSeries').onchange = e => { series = e.target.value; store.set('cj-sb-series', series); fillTopics(); render(); };
   $('#sbTopic').onchange = e => { topic = e.target.value; store.set('cj-sb-topic', topic); render(); };
-  $('#sbMode').onchange = e => { mode = e.target.value; store.set('cj-sb-mode', mode); if (mode === 'grade') $('.grade-box').open = true; render(); };
-  ['gCond', 'gBase', 'gBonus', 'gMode', 'gStep'].forEach(id => $('#' + id).oninput = $('#' + id).onchange = render);
+  $('#sbMode').onchange = e => { mode = e.target.value; store.set('cj-sb-mode', mode); if (mode !== 'raw') $('.grade-box').open = true; render(); };
+  ['gCond', 'gBase', 'gBonus', 'gMode', 'gStep', 'gPartial', 'gExtra', 'gCap'].forEach(id => $('#' + id).oninput = $('#' + id).onchange = render);
   await load(true);
   pageTimers.push(setInterval(() => { if ($('#auto') && $('#auto').checked && !document.hidden) load().catch(() => { }); }, 20000));
 }
@@ -1311,13 +1417,25 @@ async function viewClass(cid) {
         <div class="row"><input type="number" id="oSeat" placeholder="座號" style="width:80px" value="${(d.members.reduce((a, m) => Math.max(a, m.seat), 0)) + 1}">
           <input type="text" id="oName" placeholder="姓名" style="width:120px"><input type="text" id="oMail" placeholder="Email（可不填）" style="flex:1;min-width:160px">
           <button class="btn" id="oGo">新增</button></div></div>
-      <div class="card"><h3 style="margin-top:0">本班開放的題目</h3>
-        <p class="muted small">取消勾選的系列或單元，這個班的學生就看不到、也不能送出。</p>
+      <div class="card"><h3 style="margin-top:0">⭐ 指定必做題（<span id="reqN">0</span> 題）</h3>
+        <p class="muted small">學生的題目頁最上方會列出這些題目和完成狀態（✔／✘／○），題目列表也會標「⭐ 必做」。單元成績要求必做題全部完成才算達標。
+          也可以 <a href="#/edit/">新增一題只給本班的題目</a>。</p>
+        <div id="reqChips" class="req-chips"></div>
+        <div class="row" style="margin-top:8px">從單元挑選：<select id="reqUnit">${SERIES_KEYS.map(k => `<optgroup label="${esc(DATA.series[k].name)}">${Object.entries(DATA.topics).filter(([tk, t]) => t.series === k && PROBS.some(p => p.topic === tk)).map(([tk, t]) => `<option value="${tk}">${esc(t.name)}</option>`).join('')}</optgroup>`).join('')}</select></div>
+        <div id="reqPick" class="req-pick"></div>
+        <div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn primary" id="saveReq">儲存必做題</button></div></div>
+      <div class="card"><h3 style="margin-top:0">本班開放的題目與單元目標</h3>
+        <p class="muted small">取消勾選的系列或單元，這個班的學生就看不到、也不能送出。<br>
+          「目標題數」：這個單元要完成幾題（0 或空白 = 不要求）。學生的題目頁會顯示「還差幾題」，成績總表的「單元成績」以是否達到目標計分。</p>
         ${SERIES_KEYS.map(k => `<div class="open-series"><label><input type="checkbox" data-h="${k}" ${h.has(k) ? '' : 'checked'}> <b>${esc(DATA.series[k].name)}</b></label>
-          <div class="open-topics">${Object.entries(DATA.topics).filter(([, t]) => t.series === k).map(([tk, t]) => `<label><input type="checkbox" data-h="${tk}" ${h.has(tk) ? '' : 'checked'}> ${esc(t.name)}</label>`).join('')}</div></div>`).join('')}
+          <div class="goal-topics">${Object.entries(DATA.topics).filter(([, t]) => t.series === k).map(([tk, t]) => {
+            const n = PROBS.filter(p => p.topic === tk).length;
+            return `<div><label><input type="checkbox" data-h="${tk}" ${h.has(tk) ? '' : 'checked'}> ${esc(t.name)}</label>
+              <span class="small muted">目標 <input type="number" data-goal="${tk}" min="0" max="${n}" value="${(c.goals || {})[tk] || ''}" placeholder="0" style="width:56px"> / ${n} 題</span></div>`;
+          }).join('')}</div></div>`).join('')}
         <label style="display:block;margin-top:8px" class="small">另外要隱藏的題號（逗號分隔）：</label>
         <input type="text" id="hideIds" style="width:100%" value="${esc([...h].filter(x => PMAP[x]).join(', '))}">
-        <div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn primary" id="saveOpen">儲存開放設定</button></div></div>
+        <div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn primary" id="saveOpen">儲存開放設定與單元目標</button></div></div>
     </div>
   </div>`;
   const update = async (body, msg) => {
@@ -1325,11 +1443,27 @@ async function viewClass(cid) {
     catch (e) { toast(e.message); }
   };
   $('#toSb').onclick = () => store.set('cj-tcid', cid);
+  // 指定必做題
+  const req = new Set((c.required || []).filter(id => PMAP[id]));
+  const renderReq = () => {
+    $('#reqN').textContent = req.size;
+    $('#reqChips').innerHTML = req.size ? [...req].sort().map(id => `<span class="req-chip">${id} ${esc(PMAP[id].title)} <a href="javascript:void 0" data-unreq="${id}" title="移除">✕</a></span>`).join('') : '<span class="muted small">還沒有指定必做題。</span>';
+    $$('[data-unreq]').forEach(a => a.onclick = () => { req.delete(a.dataset.unreq); renderReq(); });
+    const t = $('#reqUnit').value;
+    $('#reqPick').innerHTML = PROBS.filter(p => p.topic === t).map(p => `<label><input type="checkbox" data-req="${p.id}" ${req.has(p.id) ? 'checked' : ''}> ${p.id} ${esc(p.title)} ${stars(p.difficulty)}</label>`).join('');
+    $$('[data-req]').forEach(x => x.onchange = () => { x.checked ? req.add(x.dataset.req) : req.delete(x.dataset.req); renderReq(); });
+  };
+  $('#reqUnit').onchange = renderReq;
+  renderReq();
+  $('#saveReq').onclick = () => update({ required: [...req] }, `已儲存 ${req.size} 題必做題，學生下次同步時會看到`);
   $('#cRename').onclick = () => update({ name: $('#cName').value.trim() }, '已改名');
   $('#cArchive').onclick = () => { if (c.archived || confirm('封存後學生就不能再進入這個班級（成績資料會保留，之後可以取消封存）。確定嗎？')) update({ archived: !c.archived }, c.archived ? '已取消封存' : '已封存'); };
   $('#cJoin').onchange = e => update({ allowJoin: e.target.checked }, e.target.checked ? '已開放自行加入' : '已關閉自行加入');
   $('#cNewCode').onclick = () => { if (confirm('換代碼後，舊的代碼就不能用了。確定嗎？')) update({ newCode: true }, '已換新代碼'); };
-  $('#saveOpen').onclick = () => update({ hidden: $$('[data-h]').filter(x => !x.checked).map(x => x.dataset.h).concat($('#hideIds').value.split(/[,，\s]+/).map(s => s.trim().toLowerCase()).filter(x => PMAP[x])) }, '已儲存，學生下次同步時生效');
+  $('#saveOpen').onclick = () => update({
+    hidden: $$('[data-h]').filter(x => !x.checked).map(x => x.dataset.h).concat($('#hideIds').value.split(/[,，\s]+/).map(s => s.trim().toLowerCase()).filter(x => PMAP[x])),
+    goals: Object.fromEntries($$('[data-goal]').map(x => [x.dataset.goal, Math.max(0, Math.min(+x.max, +x.value || 0))]).filter(([, v]) => v > 0)),
+  }, '已儲存，學生下次同步時生效');
   $('#imp').oninput = () => { const r = parseRoster($('#imp').value); $('#impPrev').textContent = r.length ? `讀到 ${r.length} 人：${r.slice(0, 3).map(x => x.seat + ' ' + x.name).join('、')}${r.length > 3 ? '…' : ''}` : ''; };
   const save = async rows => {
     try { const r = await api('/api/class/members/save', { cid, rows }); toast(`新增 ${r.added} 人、更新 ${r.updated} 人`); viewClass(cid); } catch (e) { toast(e.message, 4000); }
@@ -1405,7 +1539,7 @@ async function runSolution(solution, p, tests, onProgress) {
 async function viewTests(id) {
   const p = PMAP[id];
   if (!p) { app().innerHTML = '<div class="card">找不到題目</div>'; return; }
-  if (!S.user.canTests) { app().innerHTML = '<div class="card"><h2>沒有權限</h2><p>查看測資與解答需要系統管理員開放權限。</p></div>'; return; }
+  if (!S.user.canTests && !ownsProblem(p)) { app().innerHTML = '<div class="card"><h2>沒有權限</h2><p>查看測資與解答需要系統管理員開放權限。</p></div>'; return; }
   app().innerHTML = '<div class="loading">載入中…</div>';
   const d = await apiGet('/api/problem-admin/' + id);
   Judge.start().catch(() => { });
@@ -1438,25 +1572,29 @@ async function viewTests(id) {
 
 // ============ 新增／編輯題目（系統管理員） ============
 async function viewEdit(id) {
-  if (!isAdmin()) { app().innerHTML = '<div class="card">只有系統管理員可以編輯題目。</div>'; return; }
   const old = id ? PMAP[id] : null;
   if (id && !old) { app().innerHTML = '<div class="card">找不到題目</div>'; return; }
+  if (old && !isAdmin() && !ownsProblem(old)) { app().innerHTML = '<div class="card">只能編輯自己新增的班級題目。</div>'; return; }
+  const tmode = !isAdmin();   // 一般老師：為自己的班級新增題目
   app().innerHTML = '<div class="loading">載入中…</div>';
   const d = old ? await apiGet('/api/problem-admin/' + id) : { solution: TEMPLATE };
   Judge.start().catch(() => { });
   const nextId = s => { let n = 1; while (PMAP[s + String(n).padStart(3, '0')]) n++; return s + String(n).padStart(3, '0'); };
-  const p = old ? JSON.parse(JSON.stringify(old)) : { id: nextId('a'), title: '', series: 'a', topic: 'a-mix', tags: [], difficulty: 1, timeLimitMs: 1000, content: '', inputDesc: '', outputDesc: '', hint: '', tests: [{ input: '', public: true }] };
+  const p = old ? JSON.parse(JSON.stringify(old)) : { id: tmode ? '' : nextId('a'), title: '', series: tmode ? 'x' : 'a', topic: tmode ? 'x-class' : 'a-mix', classes: tmode ? [teacherCid()].filter(Boolean) : [], tags: [], difficulty: 1, timeLimitMs: 1000, content: '', inputDesc: '', outputDesc: '', hint: '', tests: [{ input: '', public: true }] };
   let tests = p.tests.map(t => t.gen ? { gen: t.gen, seed: t.seed, public: false } : { input: t.input || '', public: !!t.public });
   let gen = null;   // 用參考解答產生的答案：{ outputs, hashes }
   const builtIn = old && BUILTIN.some(x => x.id === id);
   app().innerHTML = `
-  <div class="pnav"><a class="btn" href="${old ? '#/problem/' + id : '#/admin'}">← ${old ? '回到題目' : '系統管理'}</a><span class="spacer"></span>
+  <div class="pnav"><a class="btn" href="${old ? '#/problem/' + id : tmode ? '#/problems' : '#/admin'}">← ${old ? '回到題目' : tmode ? '題目列表' : '系統管理'}</a><span class="spacer"></span>
     ${old && old.custom ? `<button class="btn danger" id="delP">${builtIn ? '↺ 恢復成內建的原始版本' : '🗑 刪除這一題'}</button>` : ''}</div>
-  <div class="card"><h2>${old ? '編輯題目 ' + esc(id) : '新增題目'}</h2>
+  <div class="card"><h2>${old ? '編輯題目 ' + esc(id) : tmode ? '新增班級題目' : '新增題目'}</h2>
+    ${tmode ? '<p class="muted small">你新增的題目只有勾選的班級看得到，放在「班級題目」系列。需要先寫好參考解答，系統會用它算出每組測資的正確答案。</p>' : ''}
     ${builtIn ? '<p class="friendly">這是內建題目。儲存後會以你的版本取代內建版本（學生的成績保留）；之後可以按「恢復成內建的原始版本」。</p>' : ''}
     <div class="form-grid">
-      <label>系列 / 單元</label><div class="row"><select id="eSeries">${SERIES_KEYS.map(k => `<option value="${k}" ${k === p.series ? 'selected' : ''}>${esc(DATA.series[k].name)}</option>`).join('')}</select><select id="eTopic"></select></div>
-      <label>題號</label><div class="row"><input type="text" id="eId" value="${esc(p.id)}" style="width:120px" ${old ? 'disabled' : ''}><span class="muted small">英文小寫開頭，例如 a101（建議用系列字母開頭）</span></div>
+      <label>給哪些班級</label><div class="row">${teacherClasses().map(c => `<label><input type="checkbox" data-ecls="${esc(c.id)}" ${(p.classes || []).includes(c.id) ? 'checked' : ''}> ${esc(c.name)}</label>`).join('') || '<span class="muted">你還沒有班級</span>'}
+        ${tmode ? '' : '<span class="muted small">（不勾 = 所有人都看得到）</span>'}<label class="req-opt"><input type="checkbox" id="eReq" ${old ? '' : 'checked'}> ⭐ 同時設為這些班級的必做題</label></div>
+      ${tmode ? '' : `<label>系列 / 單元</label><div class="row"><select id="eSeries">${SERIES_KEYS.map(k => `<option value="${k}" ${k === p.series ? 'selected' : ''}>${esc(DATA.series[k].name)}</option>`).join('')}</select><select id="eTopic"></select></div>
+      <label>題號</label><div class="row"><input type="text" id="eId" value="${esc(p.id)}" style="width:120px" ${old ? 'disabled' : ''}><span class="muted small">英文小寫開頭，例如 a101（建議用系列字母開頭）</span></div>`}
       <label>題目名稱</label><input type="text" id="eTitle" value="${esc(p.title)}">
       <label>難度 / 時間限制</label><div class="row"><select id="eDiff">${[1, 2, 3].map(n => `<option value="${n}" ${n === p.difficulty ? 'selected' : ''}>${'★'.repeat(n)}</option>`).join('')}</select>
         <input type="number" id="eTime" value="${p.timeLimitMs}" style="width:90px"> 毫秒　標籤 <input type="text" id="eTags" value="${esc((p.tags || []).join(', '))}" placeholder="用逗號分隔" style="width:220px"></div>
@@ -1473,11 +1611,13 @@ async function viewEdit(id) {
   const sol = createEditor($('#eSol'), d.solution || TEMPLATE, { onChange: () => { gen = null; showTests(); } });
   sol.setSize(null, 300);
   const fillTopic = () => {
+    if (!$('#eSeries')) return;
     const s = $('#eSeries').value;
     $('#eTopic').innerHTML = Object.entries(DATA.topics).filter(([, t]) => t.series === s).map(([k, t]) => `<option value="${k}" ${k === p.topic ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
     if (!old) { $('#eId').value = nextId(s); }
   };
-  $('#eSeries').onchange = fillTopic; fillTopic();
+  if ($('#eSeries')) $('#eSeries').onchange = fillTopic;
+  fillTopic();
   const showTests = () => {
     $('#eTests').innerHTML = tests.map((t, i) => `<div class="testcase2"><b>#${i + 1}</b>
       <div><div class="small muted">輸入 <label><input type="checkbox" data-pub="${i}" ${t.public ? 'checked' : ''} ${t.gen ? 'disabled' : ''}> 公開</label></div>
@@ -1507,17 +1647,20 @@ async function viewEdit(id) {
   };
   $('#saveP').onclick = async () => {
     const problem = {
-      id: $('#eId').value.trim().toLowerCase(), title: $('#eTitle').value.trim(), series: $('#eSeries').value, topic: $('#eTopic').value,
+      id: $('#eId') ? $('#eId').value.trim().toLowerCase() : (old ? old.id : ''), title: $('#eTitle').value.trim(),
+      series: $('#eSeries') ? $('#eSeries').value : p.series, topic: $('#eTopic') ? $('#eTopic').value : p.topic,
+      classes: $$('[data-ecls]').filter(x => x.checked).map(x => x.dataset.ecls),
       tags: $('#eTags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean), difficulty: +$('#eDiff').value, timeLimitMs: +$('#eTime').value,
       content: $('#eContent').value, inputDesc: $('#eIn').value, outputDesc: $('#eOut').value, hint: $('#eHint').value,
       solution: sol.getValue(), tests, outputs: gen.outputs, hashes: gen.hashes,
     };
-    if (!old && PMAP[problem.id]) { toast('題號已經存在'); return; }
+    if (!tmode && !old && PMAP[problem.id]) { toast('題號已經存在'); return; }
+    if (tmode && !problem.classes.length) { toast('請勾選要給哪些班級'); return; }
     const b = $('#saveP'); b.disabled = true;
     try {
-      await api('/api/problems/save', { problem });
+      const r = await api('/api/problems/save', { problem, makeRequired: $('#eReq') && $('#eReq').checked });
       await backgroundSync(true);   // 下載新的題目資料
-      toast('已儲存，學生下次同步時就會看到'); location.hash = '#/problem/' + problem.id;
+      toast('已儲存，學生下次同步時就會看到'); location.hash = '#/problem/' + r.id;
     } catch (e) { toast(e.message, 4000); b.disabled = false; }
   };
   if ($('#delP')) $('#delP').onclick = async () => {
