@@ -191,6 +191,61 @@ table.plist tr.row-none td:first-child { box-shadow: inset 4px 0 0 #d0d6de; }
 .unit-sb th.u { min-width: 90px; font-size: 13px; text-align: center; white-space: normal; }
 .unit-sb .cell { cursor: default; }
 
+/* 訪客 */
+.login-btn { background: #fff; color: var(--brand) !important; font-weight: 700; }
+.login-hint { background: #f6f9fd; border-color: #c8dcf5; }
+/* 投影模式 */
+.CodeMirror.cm-present { position: fixed !important; inset: 0; z-index: 900; height: 100vh !important; width: 100vw !important; border-radius: 0 !important; border: 0 !important; }
+body.presenting { overflow: hidden; }
+.present-bar { position: fixed; top: 10px; right: 16px; z-index: 901; display: flex; gap: 6px; align-items: center; background: rgba(0,40,80,.88); color: #fff; border-radius: 10px; padding: 6px 10px; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+.present-bar button { background: #fff; color: var(--brand); border: 0; border-radius: 6px; padding: 4px 12px; font-weight: 700; cursor: pointer; font-size: 16px; }
+.present-bar span { min-width: 30px; text-align: center; }
+/* 本班提示 */
+.hint-locked { background: #f4f5f7; border: 1px dashed #c3cad4; border-radius: 7px; padding: 8px 14px; color: #59636f; margin: 6px 0; }
+.hintbox + .hintbox { margin-top: 6px; }
+.hint-edit { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 6px 0; display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px; align-items: center; }
+.hint-edit textarea { grid-column: 1 / -1; }
+/* 錯誤分析 */
+.ana-bar { display: flex; height: 22px; border-radius: 6px; overflow: hidden; background: #e8ebef; }
+.ana-bar i { display: block; height: 100%; }
+.ana-bar i.ac { background: var(--ac); } .ana-bar i.wa { background: var(--wa); } .ana-bar i.no { background: #c3cad4; }
+.tips-box { background: #fffbea; border: 1px solid #f0d78a; border-radius: 9px; padding: 8px 14px; margin: 10px 0; }
+.tips-box ul { margin: 6px 0 0; padding-left: 20px; }
+.tips-box li { margin: 4px 0; }
+.ana-mini { display: inline-block; width: 120px; height: 10px; background: #e8ebef; border-radius: 5px; overflow: hidden; vertical-align: middle; }
+.ana-mini i { display: block; height: 100%; background: var(--wa); }
+.ana-list li { margin: 3px 0; }
+/* 截止時間 */
+.due { display: inline-block; border-radius: 10px; padding: 0 8px; font-size: 12px; font-weight: 700; background: #eef2f7; color: var(--brand); white-space: nowrap; }
+.due.soon { background: #fff4e0; color: #a35a00; }
+.due.over { background: #fdecea; color: var(--wa); }
+/* 課堂看板 */
+.live-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .live-wrap { grid-template-columns: 1fr; } }
+.live-sum { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.live-sum > div { background: #f6f9fd; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; display: flex; flex-direction: column; font-size: 13px; }
+.live-sum .big { font-size: 24px; font-weight: 700; color: var(--brand); }
+.live-sum small { font-size: 13px; color: var(--muted); font-weight: 400; }
+.live-grid { border-collapse: collapse; width: 100%; font-size: 16px; }
+.live-grid th, .live-grid td { padding: 4px 6px; text-align: center; border-bottom: 1px solid var(--line); }
+.live-grid th { background: #eef2f7; font-family: var(--mono); font-size: 13px; position: sticky; top: 0; }
+.live-grid .name { text-align: left; white-space: nowrap; }
+.live-grid tr.all-done td { background: #f3fbf5; }
+.lc { display: inline-flex; align-items: center; justify-content: center; gap: 2px; min-width: 42px; height: 30px; border-radius: 6px; font-weight: 700; color: #fff; font-size: 16px; }
+.lc small { font-size: 12px; font-weight: 400; }
+.lc.ac { background: var(--ac); } .lc.wa { background: var(--wa); } .lc.stuck { background: #f08c00; } .lc.none { background: #e8ebef; }
+.live-legend { margin-top: 10px; font-size: 13px; color: var(--muted); display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.live-legend .lc { min-width: 26px; height: 22px; font-size: 13px; }
+.help-row, .feed-row { display: flex; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px dashed var(--line); flex-wrap: wrap; }
+.help-row span { color: #a35a00; font-weight: 700; }
+.help-row a { margin-left: auto; font-size: 13px; }
+.feed-row .muted { margin-left: auto; }
+body.live-full .topbar, body.live-full .foot { display: none; }
+body.live-full main { max-width: none; padding: 10px 16px; }
+body.live-full .live-grid { font-size: 20px; }
+body.live-full .lc { min-width: 52px; height: 38px; font-size: 20px; }
+body.live-full .live-ctl { padding: 8px 14px; }
+
 /* 指定必做題 */
 .req-tag { display: inline-block; background: #fff4cc; color: #8a6200; border: 1px solid #f0d78a; border-radius: 10px; padding: 0 8px; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .req-box { margin-top: 10px; background: #fffbea; border: 1px solid #f0d78a; border-radius: 9px; padding: 10px 14px; }
