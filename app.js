@@ -15,7 +15,10 @@ const PMAP = Object.fromEntries(PROBS.map(p => [p.id, p]));
 // 老師為班級新增的題目放在「班級題目」系列
 if (!DATA.series.x) DATA.series.x = { name: '班級題目', desc: '老師為你們班新增的題目', timeLimitMs: 1000 };
 if (!DATA.topics['x-class']) DATA.topics['x-class'] = { name: '老師新增的題目', series: 'x', text: '這些是老師為你們班新增的題目。\n\n解題方法和其他題目一樣：讀取輸入、計算、輸出答案。不會寫的時候，可以先複習前面單元的語法說明。' };
-const SERIES_KEYS = Object.keys(DATA.series);
+// 系列順序：A、B、C、（限定班級的 D…）、最後是班級題目
+const SERIES_KEYS = [];
+const refreshSeriesKeys = () => { SERIES_KEYS.length = 0; SERIES_KEYS.push(...Object.keys(DATA.series).sort((a, b) => (a === 'x') - (b === 'x') || a.localeCompare(b))); };
+refreshSeriesKeys();
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch { } },
@@ -24,8 +27,21 @@ const store = {
 };
 // 系統管理員在網頁上新增／修改的題目：伺服器版本號改變時才下載，存在瀏覽器裡
 const BUILTIN = PROBS.slice();
+// 限定班級的系列（例如 D 進階程式設計）：只有被開放的班級登入後，伺服器才會傳來，存在瀏覽器裡
+let RES_PROBS = [], RES_KEYS = { series: [], topics: [] };
+function applyRestricted(r) {
+  RES_KEYS.series.forEach(k => delete DATA.series[k]);
+  RES_KEYS.topics.forEach(k => delete DATA.topics[k]);
+  r = r || { series: {}, topics: {}, problems: [] };
+  Object.assign(DATA.series, r.series); Object.assign(DATA.topics, r.topics);
+  RES_KEYS = { series: Object.keys(r.series), topics: Object.keys(r.topics) };
+  RES_PROBS = r.problems || [];
+  refreshSeriesKeys();
+}
+applyRestricted((store.json('cj-res', {}) || {}).data);
+const resRv = () => (store.json('cj-res', {}) || {}).rv || '';
 function applyCustom(list) {
-  PROBS.length = 0; PROBS.push(...BUILTIN);
+  PROBS.length = 0; PROBS.push(...BUILTIN, ...RES_PROBS);
   for (const c of list || []) {
     const i = PROBS.findIndex(p => p.id === c.id);
     if (c.deleted) continue;
@@ -78,7 +94,13 @@ const toMine = c => Object.assign({}, c, { ac: !!c.firstAC });
 // 套用伺服器回傳的同步資料。資料沒有變動時伺服器只回 same:true，瀏覽器沿用已存的資料。
 function applySync(d) {
   S.user = d.user; S.serverVersion = d.version; S.syncedAt = Date.now(); S.schema = 2;
+  if (d.restricted !== undefined) {
+    if (d.restricted) store.set('cj-res', JSON.stringify({ rv: d.rv, data: d.restricted })); else store.del('cj-res');
+    applyRestricted(d.restricted);
+    if (!d.custom) applyCustom((store.json('cj-custom', {}) || {}).list);
+  }
   if (d.custom) { store.set('cj-custom', JSON.stringify({ pv: d.pv, list: d.custom })); applyCustom(d.custom); }
+  if (d.extraSeries) S.extraSeries = d.extraSeries;
   if (d.user.admin) S.pending = d.pending || 0;
   if (d.user.role === 'guest') { S.teacherApply = d.teacherApply; S.googleName = d.googleName || S.googleName; }
   else if (d.user.role === 'teacher') {
@@ -130,7 +152,7 @@ async function api(path, body, opt = {}) {
   }
   if (!data) throw new Error(lastErr);
   if (data.status === 401 && path !== '/api/login') {
-    S = ANON(); store.del('cj-state'); location.hash = '#/login';
+    S = ANON(); store.del('cj-state'); store.del('cj-res'); applyRestricted(null); applyCustom((store.json('cj-custom', {}) || {}).list); location.hash = '#/login';
     throw new Error('登入已過期，請重新登入');
   }
   if (data.error) throw new Error(data.error);
@@ -143,11 +165,12 @@ let syncing = null;
 function backgroundSync(force) {
   if (!loggedIn() || syncing) return syncing;
   if (!force && Date.now() - (S.syncedAt || 0) < 10 * 60000) return null;
-  syncing = api('/api/sync', { cid: S.cid, v: S.v, pv: customPv(), withMine: !isGuest() && !S.mineLoaded && (!S.user || isTeacher()) }).then(d => {
+  syncing = api('/api/sync', { cid: S.cid, v: S.v, pv: customPv(), rv: resRv(), withMine: !isGuest() && !S.mineLoaded && (!S.user || isTeacher()) }).then(d => {
     const wasGuest = isGuest();
     applySync(d); renderNav();
     const page = location.hash.split('?')[0].split('/')[1] || '';
     if (wasGuest !== isGuest()) router();
+    else if (d.restricted !== undefined) router();
     else if ((!d.same || d.custom) && !isTeacher() && ['problems', 'submissions'].includes(page)) router();
   }).catch(e => { if (force) toast(e.message); }).finally(() => { syncing = null; });
   return syncing;
@@ -484,7 +507,7 @@ function toggleNotif() {
   setTimeout(() => document.addEventListener('click', function h(e) { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('click', h); } }), 0);
 }
 async function logout() {
-  S = ANON(); store.del('cj-state'); store.del('cj-custom'); applyCustom([]);
+  S = ANON(); store.del('cj-state'); store.del('cj-custom'); store.del('cj-res'); applyRestricted(null); applyCustom([]);
   try { google.accounts.id.disableAutoSelect(); } catch { }
   location.hash = '#/problems'; renderNav();
 }
@@ -535,7 +558,7 @@ function viewLogin() {
   const finish = async credential => {
     $('#lerr').textContent = ''; $('#gbtn').innerHTML = '<span class="muted">登入中…</span>';
     try {
-      const d = await api('/api/login', { credential, pv: customPv() });
+      const d = await api('/api/login', { credential, pv: customPv(), rv: resRv() });
       S = { token: d.token, subs: [] };
       applySync(d);
       const back = store.get('cj-after-login'); store.del('cj-after-login');
@@ -826,10 +849,15 @@ const TEMPLATE = '#include <iostream>\nusing namespace std;\n\nint main() {\n   
 let LESSON_CODES = [];
 function renderLesson(text) {
   LESSON_CODES = [];
-  const parts = String(text).split(/```(?:cpp|c\+\+)?\n?([\s\S]*?)```/);
+  // ```cpp 程式碼、```text 方塊圖（等寬文字）、```mermaid 流程圖
+  const parts = String(text).split(/```([\w+]*)\n?([\s\S]*?)```/);
   return parts.map((part, i) => {
-    if (i % 2 === 1) {
-      const code = part.replace(/\n$/, ''), idx = LESSON_CODES.push(code) - 1;
+    if (i % 3 === 1) return '';
+    if (i % 3 === 2) {
+      const lang = parts[i - 1].toLowerCase(), body = part.replace(/\n$/, '');
+      if (lang === 'text') return `<pre class="diagram">${esc(body)}</pre>`;
+      if (lang === 'mermaid') return mmdHtml(body);
+      const code = body, idx = LESSON_CODES.push(code) - 1;
       return `<div class="lcode"><div class="lcode-bar"><span>C++</span><span class="spacer"></span>
         <button class="btn sm" data-lcopy="${idx}">📋 複製</button><button class="btn sm" data-lput="${idx}">↪ 放到編輯器</button></div>
         <pre class="cm-s-default">${highlightCpp(code)}</pre></div>`;
@@ -850,6 +878,34 @@ function renderLesson(text) {
     return html;
   }).join('');
 }
+// 流程圖（Mermaid）：頁面上有流程圖時才下載繪圖程式（只下載一次，瀏覽器會快取）；載入失敗就顯示原始文字
+const mmdHtml = src => `<div class="mmd"><pre class="diagram">${esc(src)}</pre></div>`;
+let mermaidP = null, mmdSeq = 0;
+function loadMermaid() {
+  return mermaidP || (mermaidP = new Promise((ok, no) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js';
+    s.onload = () => { window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' }); ok(window.mermaid); };
+    s.onerror = () => { mermaidP = null; no(new Error('流程圖載入失敗')); };
+    document.head.appendChild(s);
+  }));
+}
+async function drawDiagrams() {
+  const els = $$('.mmd:not([data-done])');
+  if (!els.length) return;
+  els.forEach(el => el.dataset.done = '1');
+  let m;
+  try { m = await loadMermaid(); } catch { return; }
+  for (const el of els) {
+    try { const { svg } = await m.render('mmd' + (++mmdSeq), el.querySelector('pre').textContent); el.innerHTML = svg; }
+    catch (e) { console.warn('流程圖格式錯誤', e); }
+  }
+}
+function watchDiagrams() {
+  const a = $('#app');
+  if (a) new MutationObserver(() => { if (document.querySelector('.mmd:not([data-done])')) drawDiagrams(); }).observe(a, { childList: true, subtree: true });
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watchDiagrams); else watchDiagrams();
 function highlightCpp(code) {
   if (!CodeMirror.runMode) return esc(code);
   let out = '';
@@ -900,11 +956,13 @@ async function viewProblem(id) {
         <div class="muted small" style="margin:4px 0 10px">${esc(DATA.series[p.series].name)} · ${esc(topic.name)} · ${stars(p.difficulty)} · 時間限制 ${p.timeLimitMs / 1000} 秒 · ${p.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
         <details class="lesson" ${store.get('cj-lesson-' + p.topic) === 'open' ? 'open' : ''}><summary>📘 語法說明：${esc(topic.name)}</summary><div class="lesson-body">${renderLesson(topic.text)}</div></details>
         <h3>題目內容</h3><div class="pbody">${esc(p.content)}</div>
+        ${p.diagram ? `<h3>示意圖</h3><pre class="diagram">${esc(p.diagram)}</pre>` : ''}
         <h3>輸入說明</h3><div class="pbody">${esc(p.inputDesc)}</div>
         <h3>輸出說明</h3><div class="pbody">${esc(p.outputDesc)}</div>
         ${p.samples.map((s, i) => `<h3>範例 ${i + 1}</h3><div class="sample">
           <div class="box"><div class="h">範例輸入<span class="spacer"></span><a href="javascript:void 0" data-copy-in="${i}">放到測試輸入</a></div><pre>${esc(s.input) || '<span class="muted">（無）</span>'}</pre></div>
           <div class="box"><div class="h">範例輸出</div><pre>${esc(s.output)}</pre></div></div>`).join('')}
+        ${p.flow ? `<h3>流程圖</h3>${mmdHtml(p.flow)}` : ''}
         ${p.hint ? `<h3>提示</h3><div class="hintbox">${esc(p.hint)}</div>` : ''}
         <div id="classHints">${hintsBoxHtml(p)}</div>
       </div>
@@ -1372,7 +1430,7 @@ async function viewSubmission(id) {
     const btn = $('#rejudge'); btn.disabled = true; btn.textContent = '評測中…';
     try {
       const j = await Judge.judgeAll(s.code, p);
-      const r = await api(`/api/submissions/${s.id}/rejudge`, { version: DATA.version, ...j.payload });
+      const r = await api(`/api/submissions/${s.id}/rejudge`, { version: DATA.version, pver: (PMAP[s.pid] || {}).ver, ...j.payload });
       Object.assign(s, r.submission, { local: (j.local || []).map(x => ({ stdout: x.stdout, error: x.error, exitCode: x.exitCode, stderr: x.stderr })) });
       $('#resbox').innerHTML = renderResult(s, p); toast('重新評測完成：' + s.verdict);
     } catch (e) { toast(e.message); }
@@ -1685,6 +1743,7 @@ async function viewClass(cid) {
   const i = (S.classes || []).findIndex(x => x.id === c.id);
   if (i >= 0) { S.classes[i] = c; saveState(); }
   const h = new Set(c.hidden || []);
+  const extraSeries = d.extraSeries || S.extraSeries || {};
   app().innerHTML = `
   <div class="pnav"><a class="btn" href="#/classes">← 班級列表</a><a class="btn" href="#/scoreboard" id="toSb">成績總表</a></div>
   <div class="card"><div class="row"><h2 style="margin:0">${esc(c.name)}</h2>${c.archived ? '<span class="tag">已封存</span>' : ''}<span class="spacer"></span>
@@ -1693,7 +1752,9 @@ async function viewClass(cid) {
     <div class="join-box"><div>加入代碼<code class="jcode big">${esc(c.code)}</code></div>
       <div><label><input type="checkbox" id="cJoin" ${c.allowJoin ? 'checked' : ''}> 開放學生用代碼自行加入</label><br>
         <span class="muted small">學生用 Google 帳號登入 → 輸入代碼、座號、姓名。名單上已經有座號但沒有 Email 的，學生輸入相同的座號和姓名就會綁定（不需要開放也可以）。</span></div>
-      <button class="btn sm" id="cNewCode">換一個代碼</button></div></div>
+      <button class="btn sm" id="cNewCode">換一個代碼</button></div>
+    ${Object.entries(extraSeries).map(([k, s]) => `<div class="join-box"><div><label><input type="checkbox" data-extra="${k}" ${(c.extra || []).includes(k) ? 'checked' : ''}> <b>開放「${esc(s.name)}」給本班</b></label><br>
+      <span class="muted small">${esc(s.desc)}。這是限定班級的系列：沒有開放的班級、沒有登入的訪客完全看不到；開放後學生下次同步（重新整理或按 🔄）就會出現。</span></div></div>`).join('')}</div>
   <div class="problem-layout">
     <div class="card"><h3 style="margin-top:0">學生名單（${d.members.length} 人）</h3>
       ${d.members.length ? `<div class="table-wrap"><table class="list"><thead><tr><th>座號</th><th>姓名</th><th>Email</th><th>最近活動</th><th></th></tr></thead><tbody>
@@ -1744,6 +1805,10 @@ async function viewClass(cid) {
     catch (e) { toast(e.message); }
   };
   $('#toSb').onclick = () => store.set('cj-tcid', cid);
+  $$('[data-extra]').forEach(x => x.onchange = async () => {
+    await update({ extra: $$('[data-extra]').filter(y => y.checked).map(y => y.dataset.extra) }, x.checked ? '已開放，學生下次同步時就會看到' : '已關閉，學生下次同步時就看不到了');
+    backgroundSync(true);   // 老師自己也要下載（或刪除）這個系列的題目
+  });
   // 指定必做題
   const req = new Set((c.required || []).filter(id => PMAP[id]));
   const renderReq = () => {
