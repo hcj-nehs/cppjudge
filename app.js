@@ -1866,11 +1866,16 @@ async function viewClass(cid) {
     hidden: $$('[data-h]').filter(x => !x.checked).map(x => x.dataset.h).concat($('#hideIds').value.split(/[,，\s]+/).map(s => s.trim().toLowerCase()).filter(x => PMAP[x])),
     goals: Object.fromEntries($$('[data-goal]').map(x => [x.dataset.goal, Math.max(0, Math.min(+x.max, +x.value || 0))]).filter(([, v]) => v > 0)),
   }, '已儲存，學生下次同步時生效');
-  $('#imp').oninput = () => { const r = parseRoster($('#imp').value); $('#impPrev').textContent = r.length ? `讀到 ${r.length} 人：${r.slice(0, 3).map(x => x.seat + ' ' + x.name).join('、')}${r.length > 3 ? '…' : ''}` : ''; };
+  const dupSeats = rows => [...new Set(rows.map(x => x.seat).filter((s, i, a) => a.indexOf(s) !== i))];
+  $('#imp').oninput = () => {
+    const r = parseRoster($('#imp').value), dup = dupSeats(r);
+    $('#impPrev').innerHTML = !r.length ? '' : dup.length ? `<b style="color:var(--wa)">⚠ 座號 ${dup.join('、')} 重複了。兩班合併上課請建立兩個班級，或把座號改成 101、102…、201、202…</b>`
+      : esc(`讀到 ${r.length} 人：${r.slice(0, 3).map(x => x.seat + ' ' + x.name).join('、')}${r.length > 3 ? '…' : ''}`);
+  };
   const save = async rows => {
     try { const r = await api('/api/class/members/save', { cid, rows }); toast(`新增 ${r.added} 人、更新 ${r.updated} 人`); viewClass(cid); } catch (e) { toast(e.message, 4000); }
   };
-  $('#impGo').onclick = () => { const rows = parseRoster($('#imp').value); if (!rows.length) { toast('沒有讀到資料，每一行要有座號'); return; } save(rows); };
+  $('#impGo').onclick = () => { const rows = parseRoster($('#imp').value); if (!rows.length) { toast('沒有讀到資料，每一行要有座號'); return; } if (dupSeats(rows).length) { toast(`座號 ${dupSeats(rows).join('、')} 重複了，請修改後再匯入`, 5000); return; } save(rows); };
   $('#oGo').onclick = () => { if (!+$('#oSeat').value || !$('#oName').value.trim()) { toast('請輸入座號和姓名'); return; } save([{ seat: +$('#oSeat').value, name: $('#oName').value.trim(), email: $('#oMail').value.trim() }]); };
   $$('[data-rm]').forEach(b => b.onclick = async () => {
     if (!confirm(`確定要把座號 ${b.dataset.rm} 移出名單嗎？（成績會保留，重新加入同座號會恢復）`)) return;
