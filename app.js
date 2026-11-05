@@ -468,6 +468,7 @@ function renderNav() {
   const links = !loggedIn() ? [['problems', '題目']] : isGuest() ? [['problems', '題目'], ['welcome', '加入班級']] : [
     ['problems', '題目'], ['submissions', isTeacher() ? '解題動態' : '我的紀錄'],
     ...(isTeacher() ? [['live', '課堂看板'], ['scoreboard', '成績總表'], ['classes', '班級管理']] : []),
+    ...(window.CJ_ESCAPE && (isTeacher() || Object.keys((S.klass && S.klass.escape) || {}).length) ? [['escape', '🔐 密室測驗']] : []),
     ...(isAdmin() ? [['admin', '系統管理' + (S.pending ? ` <span class="dot-badge">${S.pending}</span>` : '')]] : []),
   ];
   $('#nav').innerHTML = links.map(([k, t]) => `<a href="#/${k}" class="${r === k || (r === 'problem' && k === 'problems') || (r === 'submission' && k === 'submissions') || (r === 'class' && k === 'classes') ? 'on' : ''}">${t}</a>`).join('');
@@ -525,7 +526,7 @@ async function router() {
   if (!loggedIn() && !['login', 'problems', 'problem'].includes(page)) { store.set('cj-after-login', location.hash); location.hash = '#/login'; return; }
   renderNav();
   const views = { login: viewLogin, welcome: viewWelcome, problems: viewProblems, problem: viewProblem, submissions: viewSubmissions, submission: viewSubmission, scoreboard: viewScoreboard, classes: viewClasses, class: viewClass, admin: viewAdmin, me: viewMe, tests: viewTests, edit: viewEdit, live: viewLive };
-  const v = views[page];
+  const v = views[page] || (window.CJ_VIEWS || {})[page];   // escape.js 等外掛頁面
   if (!v) { location.hash = '#/problems'; return; }
   if (isGuest() && !['welcome', 'login', 'problems', 'problem', 'me'].includes(page)) { location.hash = '#/welcome'; return; }
   if (!isGuest() && page === 'welcome') { location.hash = '#/problems'; return; }
