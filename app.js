@@ -68,7 +68,7 @@ function fmtTime(ts, short) {
   if (short && today) return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-const VERDICT = { AC: '通過', WA: '答案錯誤', TLE: '執行超時', RE: '執行錯誤', CE: '編譯錯誤', OLE: '輸出過多' };
+const VERDICT = { AC: '通過', WA: '答案錯誤', TLE: '執行超時', RE: '執行錯誤', CE: '編譯錯誤', OLE: '輸出過多', VOID: '老師作廢' };
 const vBadge = v => `<span class="v ${esc(v)}" title="${esc(VERDICT[v] || v)}">${esc(v)}</span>`;
 const stars = n => `<span class="stars">${'★'.repeat(n)}${'☆'.repeat(Math.max(0, 3 - n))}</span>`;
 const rankBadge = r => `<span class="rank r${Math.min(r, 4)}">${r <= 3 ? ['🥇', '🥈', '🥉'][r - 1] : ''}第 ${r} 名</span>`;
@@ -848,6 +848,7 @@ function viewProblems() {
 // ============ 題目頁（解題） ============
 const TEMPLATE = '#include <iostream>\nusing namespace std;\n\nint main() {\n    \n    return 0;\n}\n';
 let LESSON_CODES = [];
+let EDITOR_CLIP = '';   // 最近一次從程式編輯器複製／剪下的內容
 function renderLesson(text) {
   LESSON_CODES = [];
   // ```cpp 程式碼、```text 方塊圖（等寬文字）、```mermaid 流程圖
@@ -968,7 +969,7 @@ async function viewProblem(id) {
         <div id="classHints">${hintsBoxHtml(p)}</div>
       </div>
       ${!loggedIn() || isGuest() ? `<div class="card login-hint"><b>想記錄成績、看本班排名嗎？</b> ${isGuest() ? '<a href="#/welcome">加入班級</a>' : '<a href="#/login" id="hintLogin">登入 / 註冊</a>'}後送出評測，系統會記錄你的完成狀態。</div>` : `<div class="card">
-        <div class="tabs" id="ptabs"><button data-t="mine" class="on">${isTeacher() ? '我的測試' : '我的提交'}</button><button data-t="rank">🏆 ${isTeacher() ? '完成名次' : '本班完成名次'}</button>${isTeacher() ? '<button data-t="students">全班狀況</button><button data-t="analysis">📊 錯誤分析</button><button data-t="hints">💡 本班提示</button>' : ''}</div>
+        <div class="tabs" id="ptabs"><button data-t="mine" class="on">${isTeacher() ? '我的測試' : '我的提交'}</button><button data-t="rank">🏆 ${isTeacher() ? '完成名次' : '本班完成名次'}</button>${isTeacher() ? '<button data-t="students">全班狀況</button><button data-t="analysis">📊 錯誤分析</button><button data-t="inspect">🕵 作答檢查</button><button data-t="hints">💡 本班提示</button>' : ''}</div>
         <div id="ptab"></div>
       </div>`}
       ${navBar('bottom')}
@@ -988,7 +989,7 @@ async function viewProblem(id) {
           <div><label>測試輸入</label><textarea id="stdin" spellcheck="false">${esc(p.samples[0] ? p.samples[0].input : '')}</textarea></div>
           <div><label>執行結果 <span id="cmpRes"></span></label><pre class="out" id="stdout"></pre></div>
         </div>
-        <div class="muted small" style="margin-top:4px">💡 打字時會自動提示關鍵字（Ctrl+空白鍵）；程式會自動存成草稿。「執行測試」不會記錄成績，「送出評測」才會。</div>
+        <div class="muted small" style="margin-top:4px">💡 打字時會自動提示關鍵字（Ctrl+空白鍵）；程式會自動存成草稿。「執行測試」不會記錄成績，「送出評測」才會。${!isTeacher() && S.klass && S.klass.opts && S.klass.opts.noPaste ? '<br><b style="color:var(--wa)">🚫 本班禁止貼上程式碼</b>：請自己打字；從這個編輯器複製、剪下的內容可以貼回來。' : ''}</div>
         <div id="result"></div>
       </div>
     </div>
@@ -1000,6 +1001,35 @@ async function viewProblem(id) {
 
   const cm = createEditor($('#editor'), initial, { onChange: cm => { store.set(draftKey, cm.getValue()); scheduleLint(); } });
   setTimeout(() => cm.refresh(), 0);
+  // 作答資訊：貼上幾個字、打了幾個字、從開始寫到送出多久（送出時一起傳給老師參考；複製語法說明的範例程式不算貼上）
+  const metaKey = `cj-meta-${S.user ? S.user.email : 'guest'}-${p.id}`;
+  const meta = Object.assign({ paste: 0, pasteN: 0, big: 0, typed: 0, first: 0, blocked: 0 }, (() => { try { return JSON.parse(store.get(metaKey) || '{}'); } catch { return {}; } })());
+  // 從自己的編輯器複製／剪下的內容（搬移自己的程式不算貼上，禁止貼上時也可以貼回來）
+  const ownText = t => { t = normalize(t); return !!t && !!EDITOR_CLIP && normalize(EDITOR_CLIP).includes(t); };
+  const lessonText = t => LESSON_CODES.some(c => normalize(c) === normalize(t));
+  const grab = cm => { EDITOR_CLIP = cm.somethingSelected() ? cm.getSelection() : cm.getLine(cm.getCursor().line); };
+  cm.on('copy', grab); cm.on('cut', grab);
+  const noPaste = !isTeacher() && !!(S.klass && S.klass.opts && S.klass.opts.noPaste);
+  if (noPaste) {
+    const blocked = () => { meta.blocked++; store.set(metaKey, JSON.stringify(meta)); toast('🚫 本班禁止貼上程式碼，請自己打字（從這個編輯器複製的內容可以貼回來）', 3500); };
+    cm.on('paste', (_, e) => {
+      const t = (e.clipboardData && e.clipboardData.getData('text/plain')) || '';
+      if (t && (ownText(t) || lessonText(t))) return;
+      e.preventDefault(); blocked();
+    });
+    cm.on('drop', (_, e) => { e.preventDefault(); blocked(); });
+    cm.on('beforeChange', (_, ch) => { if (ch.origin === 'drop') ch.cancel(); });
+  }
+  cm.on('change', (_, ch) => {
+    const text = (ch.text || []).join('\n');
+    if (!text || ch.origin === 'setValue') return;
+    if (!meta.first) meta.first = Date.now();
+    if (ch.origin === 'paste' || ch.origin === 'drop') {
+      if (lessonText(text) || ownText(text)) return;
+      meta.paste += text.length; meta.pasteN++; meta.big = Math.max(meta.big, text.length);
+    } else if (ch.origin === '+input') meta.typed += text.length;
+    store.set(metaKey, JSON.stringify(meta));
+  });
 
   // 停止打字 1.5 秒後檢查語法（編譯器空閒時才做）
   let lintTimer, lintSeq = 0;
@@ -1087,7 +1117,8 @@ async function viewProblem(id) {
       const j = await Judge.judgeAll(code, p, (i, n) => { res.innerHTML = `<div class="result-box">評測中… 第 ${i} / ${n} 組測資</div>`; });
       markErrors(cm, j.compile.diags); lintBox(j.compile.diags, j.compile.success);
       res.innerHTML = '<div class="result-box">上傳結果中…</div>';
-      const d = await api('/api/submit', { problemId: p.id, code, version: DATA.version, pver: p.ver, cid: S.cid, ...j.payload });
+      const d = await api('/api/submit', { problemId: p.id, code, version: DATA.version, pver: p.ver, cid: S.cid, ...j.payload,
+        meta: { paste: meta.paste, pasteN: meta.pasteN, big: meta.big, typed: meta.typed, blocked: meta.blocked, ms: meta.first ? Date.now() - meta.first : 0 } });
       const sub = Object.assign(d.submission, { code, diags: j.compile.diags, local: (j.local || []).map(r => ({ stdout: (r.stdout || '').slice(0, 2000), stderr: (r.stderr || '').slice(0, 500), error: r.error, exitCode: r.exitCode })) });
       recordSubmission(p, sub, d);
       res.innerHTML = renderResult(sub, p, next);
@@ -1120,6 +1151,7 @@ async function viewProblem(id) {
           ${list.map((r, i) => `<tr class="${r[0] === S.user.seat ? 'me-row' : ''}"><td>${rankBadge(i + 1)}</td><td>${seat2(r[0])}</td><td>${esc((S.classmates || {})[r[0]] || '')}${r[0] === S.user.seat ? '（我）' : ''}</td>
             <td>${fmtTime(r[1])}</td><td>${r[2]} 次</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">還沒有人完成這一題，加油！</p>');
     } else if (tab === 'analysis') await teacherAnalysis();
+    else if (tab === 'inspect') await window.renderInspect(el, p, () => tab === 'inspect' && !!$('#ptab'));
     else if (tab === 'hints') teacherHints();
     else await teacherStatus(fetch !== false, false);
   }
@@ -1376,6 +1408,8 @@ async function viewSubmission(id) {
       <tr><td>${s.name ? `${esc(s.cls)}-${seat2(s.seat)} ${esc(s.name)} <span class="muted small">${esc(s.account || '')}</span>` : esc(S.user.name)}${isTeacher() && s.account ? ` · <a href="#/submissions?account=${esc(s.account)}">他的所有提交</a>` : ''}</td>
       <td><a href="#/problem/${esc(s.pid)}">${esc(s.pid)} ${esc(p ? p.title : '')}</a></td>
       <td>${s.score} / 100</td><td>${s.verdict === 'CE' ? '-' : s.timeMs + ' ms'}</td><td>${fmtTime(s.time)}</td></tr></table>
+    ${s.meta && s.meta.void ? `<div class="err" style="margin-top:8px">🚫 這筆提交已被老師作廢（原本結果 ${esc(s.meta.void.verdict)}、${s.meta.void.score} 分）${s.meta.void.reason ? '，原因：' + esc(s.meta.void.reason) : ''}。可以在題目頁「🕵 作答檢查」恢復。</div>` : ''}
+    ${isTeacher() && s.meta && (s.meta.typed || s.meta.paste) ? `<div class="muted small" style="margin-top:6px">✍ 作答資訊：打字 ${s.meta.typed} 字、貼上 ${s.meta.pasteN || 0} 次共 ${s.meta.paste} 字（最大一次 ${s.meta.big} 字）${s.meta.ms ? `、從開始寫到送出約 ${Math.round(s.meta.ms / 60000)} 分鐘` : ''}</div>` : ''}
   </div>
   <div class="problem-layout">
     <div class="card">
@@ -1711,7 +1745,7 @@ async function viewClasses() {
       <input type="text" id="ncName" placeholder="新班級名稱，例如 901 或 七年級資訊社" style="width:280px"><button class="btn primary" id="ncGo">＋ 建立班級</button></div>
     <p class="muted small">建立班級後，可以「貼上名單」（座號、姓名、Email），或把「加入代碼」給學生，讓學生登入後自己加入。</p></div>
     <div class="card">${list.length ? `<div class="table-wrap"><table class="list"><thead><tr><th>班級</th><th>人數</th><th>加入代碼</th><th>學生自行加入</th>${isAdmin() ? '<th>老師</th>' : ''}<th></th></tr></thead><tbody>
-      ${list.map(c => `<tr class="${c.archived ? 'muted' : ''}"><td><a href="#/class/${esc(c.id)}"><b>${esc(c.name)}</b></a>${c.archived ? '（已封存）' : ''}</td><td>${c.count}</td>
+      ${list.map(c => `<tr class="${c.archived ? 'muted' : ''}"><td><a href="#/class/${esc(c.id)}"><b>${esc(c.name)}</b></a>${c.archived ? '（已封存）' : ''}${c.owner !== S.user.email && !isAdmin() ? ` <span class="tag" title="建立班級：${esc(c.ownerName)}">協同</span>` : (c.co || []).length ? ` <span class="tag" title="${esc(c.co.map(t => t.name || t.email).join('、'))}">＋${c.co.length} 位協同老師</span>` : ''}</td><td>${c.count}</td>
         <td><code class="jcode">${esc(c.code)}</code></td><td>${c.allowJoin ? '開放' : '<span class="muted">關閉</span>'}</td>${isAdmin() ? `<td class="small">${esc(c.ownerName)}</td>` : ''}
         <td><a class="btn sm" href="#/class/${esc(c.id)}">管理名單與設定</a> <a class="btn sm" href="#/scoreboard" data-sb="${esc(c.id)}">成績</a></td></tr>`).join('')}</tbody></table></div>`
       : '<p class="muted">還沒有班級。</p>'}</div>`;
@@ -1745,6 +1779,7 @@ async function viewClass(cid) {
   if (i >= 0) { S.classes[i] = c; saveState(); }
   const h = new Set(c.hidden || []);
   const extraSeries = d.extraSeries || S.extraSeries || {};
+  const coEdit = isAdmin() || c.owner === S.user.email;
   app().innerHTML = `
   <div class="pnav"><a class="btn" href="#/classes">← 班級列表</a><a class="btn" href="#/scoreboard" id="toSb">成績總表</a></div>
   <div class="card"><div class="row"><h2 style="margin:0">${esc(c.name)}</h2>${c.archived ? '<span class="tag">已封存</span>' : ''}<span class="spacer"></span>
@@ -1755,7 +1790,15 @@ async function viewClass(cid) {
         <span class="muted small">學生用 Google 帳號登入 → 輸入代碼、座號、姓名。名單上已經有座號但沒有 Email 的，學生輸入相同的座號和姓名就會綁定（不需要開放也可以）。</span></div>
       <button class="btn sm" id="cNewCode">換一個代碼</button></div>
     ${Object.entries(extraSeries).map(([k, s]) => `<div class="join-box"><div><label><input type="checkbox" data-extra="${k}" ${(c.extra || []).includes(k) ? 'checked' : ''}> <b>開放「${esc(s.name)}」給本班</b></label><br>
-      <span class="muted small">${esc(s.desc)}。這是限定班級的系列：沒有開放的班級、沒有登入的訪客完全看不到；開放後學生下次同步（重新整理或按 🔄）就會出現。</span></div></div>`).join('')}</div>
+      <span class="muted small">${esc(s.desc)}。這是限定班級的系列：沒有開放的班級、沒有登入的訪客完全看不到；開放後學生下次同步（重新整理或按 🔄）就會出現。</span></div></div>`).join('')}
+    <div class="join-box"><div><label><input type="checkbox" id="cNoPaste" ${(c.opts || {}).noPaste ? 'checked' : ''}> <b>🚫 禁止學生貼上程式碼</b></label><br>
+      <span class="muted small">開啟後，本班學生在題目的程式編輯器裡不能貼上、也不能拖曳放入程式（從自己編輯器複製的內容、語法說明的範例程式仍然可以貼）。被擋下的次數會記在「🕵 作答檢查」。學生重新整理或按 🔄 後生效。</span></div></div>
+    <div class="join-box co-box"><div style="flex:1"><b>👩‍🏫 班級老師</b>
+        <div class="small" style="margin:4px 0">建立班級：${esc(c.ownerName || c.owner)}（${esc(c.owner)}）</div>
+        <div id="coList">${(c.co || []).map(t => `<span class="req-chip">協同：${esc(t.name || t.email)} <span class="muted">${esc(t.email)}</span>${t.ok ? '' : ' <b style="color:var(--wa)">（帳號未開通）</b>'}${coEdit ? ` <a href="javascript:void 0" data-unco="${esc(t.email)}" title="移除">✕</a>` : ''}</span>`).join('') || '<span class="muted small">還沒有協同老師。</span>'}</div>
+        ${coEdit ? `<div class="row" style="margin-top:6px"><input type="email" id="coMail" placeholder="協同老師的 Google 帳號 Email" style="flex:1;min-width:220px"><button class="btn sm" id="coAdd">＋ 加入協同老師</button></div>
+        <span class="muted small">協同老師和你有這個班級的全部權限（名單、成績、設定、作答檢查、作廢、密室測驗…），但只有你可以增減協同老師。對方要先有老師帳號（登入網站 → 申請老師 → 由系統管理員開通）。</span>`
+        : '<span class="muted small">你是這個班級的協同老師，擁有全部權限；要增減協同老師請找建立班級的老師。</span>'}</div></div></div>
   <div class="problem-layout">
     <div class="card"><h3 style="margin-top:0">學生名單（${d.members.length} 人）</h3>
       ${d.members.length ? `<div class="table-wrap"><table class="list"><thead><tr><th>座號</th><th>姓名</th><th>Email</th><th>最近活動</th><th></th></tr></thead><tbody>
@@ -1806,6 +1849,16 @@ async function viewClass(cid) {
     catch (e) { toast(e.message); }
   };
   $('#toSb').onclick = () => store.set('cj-tcid', cid);
+  $('#cNoPaste').onchange = e => update({ opts: { noPaste: e.target.checked } }, e.target.checked ? '已禁止貼上，學生重新整理後生效' : '已允許貼上');
+  // 協同老師
+  const coEmails = (c.co || []).map(t => t.email);
+  $$('[data-unco]').forEach(a => a.onclick = () => { if (confirm(`把 ${a.dataset.unco} 移出這個班級的協同老師？`)) update({ co: coEmails.filter(e => e !== a.dataset.unco) }, '已移除協同老師'); });
+  if ($('#coAdd')) $('#coAdd').onclick = () => {
+    const e = $('#coMail').value.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { toast('請輸入正確的 Email'); return; }
+    if (e === c.owner || coEmails.includes(e)) { toast('這位老師已經在這個班級了'); return; }
+    update({ co: [...coEmails, e] }, '已加入協同老師，對方重新整理網頁後就會看到這個班級');
+  };
   $$('[data-extra]').forEach(x => x.onchange = async () => {
     await update({ extra: $$('[data-extra]').filter(y => y.checked).map(y => y.dataset.extra) }, x.checked ? '已開放，學生下次同步時就會看到' : '已關閉，學生下次同步時就看不到了');
     backgroundSync(true);   // 老師自己也要下載（或刪除）這個系列的題目

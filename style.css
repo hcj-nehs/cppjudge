@@ -54,7 +54,27 @@ table.list tr:hover td { background: #f8fafc; }
 .table-wrap { overflow-x: auto; }
 .v { display: inline-block; font-weight: 700; font-family: var(--mono); padding: 0 8px; border-radius: 5px; color: #fff; font-size: 13px; line-height: 22px; min-width: 38px; text-align: center; }
 .v.AC { background: var(--ac); } .v.WA { background: var(--wa); } .v.TLE { background: var(--tle); }
-.v.RE { background: var(--re); } .v.CE { background: var(--ce); } .v.OLE { background: var(--ole); }
+/* 作答檢查 */
+.insp-flag { display: inline-block; font-size: 12px; border-radius: 4px; padding: 0 6px; margin: 1px; background: #eee; color: #333; white-space: nowrap; }
+.insp-flag.f-sim { background: #fde2e1; color: #a1261d; } .insp-flag.f-cmt { background: #fff1d6; color: #8a5a00; } .insp-flag.f-gap { background: #ece3fa; color: #5b2d91; }
+.insp-flag.f-paste { background: #fde2e1; color: #a1261d; } .insp-flag.f-adv { background: #e3effb; color: #1d4f86; }
+.insp-table tr.insp-hot td { background: #fff8f0; } .insp-table tr.insp-void td { opacity: .55; }
+.insp-acts { white-space: nowrap; }
+.insp-detail-box { padding: 6px 4px; }
+.insp-code { font-family: var(--mono); font-size: 13px; background: #f7f8fa; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; max-height: 420px; overflow: auto; margin: 6px 0; white-space: pre; }
+.insp-code i { display: inline-block; width: 2.2em; color: #9aa4b1; font-style: normal; user-select: none; }
+.insp-code .insp-cmt { color: #1e8e3e; background: #eaf6ec; }
+.insp-code .insp-same { background: #ffe9a8; }
+.insp-modal { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding: 30px 16px; overflow: auto; }
+.insp-modal-card { background: #fff; border-radius: 10px; padding: 16px; width: min(1200px, 100%); }
+.insp-cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.insp-cmp .insp-code { max-height: 70vh; }
+.insp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; margin-top: 10px; }
+.insp-grid > div { border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.insp-grid > div.hot { border-color: #e0a29c; background: #fffaf8; }
+.insp-grid .insp-code { max-height: 300px; font-size: 12px; }
+@media (max-width: 760px) { .insp-cmp { grid-template-columns: 1fr; } }
+.v.RE { background: var(--re); } .v.CE { background: var(--ce); } .v.OLE { background: var(--ole); } .v.VOID { background: #555; text-decoration: line-through; }
 .vtext.AC { color: var(--ac); } .vtext.WA { color: var(--wa); } .vtext.TLE { color: var(--tle); } .vtext.RE { color: var(--re); } .vtext.CE { color: var(--ce); }
 .tag { display: inline-block; background: var(--accent); color: var(--brand); border-radius: 4px; padding: 0 7px; font-size: 12px; margin: 1px 2px; }
 .stars { color: #f0a500; letter-spacing: -1px; }
