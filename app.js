@@ -469,6 +469,8 @@ function renderNav() {
     ['problems', '題目'], ['submissions', isTeacher() ? '解題動態' : '我的紀錄'],
     ...(isTeacher() ? [['live', '課堂看板'], ['scoreboard', '成績總表'], ['classes', '班級管理']] : []),
     ...(window.CJ_ESCAPE && (isTeacher() || Object.keys((S.klass && S.klass.escape) || {}).length) ? [['escape', '🔐 密室測驗']] : []),
+    ['quiz', '🎮 知識王'],
+    ['post', '📮 栗尾郵局'],
     ...(isAdmin() ? [['admin', '系統管理' + (S.pending ? ` <span class="dot-badge">${S.pending}</span>` : '')]] : []),
   ];
   $('#nav').innerHTML = links.map(([k, t]) => `<a href="#/${k}" class="${r === k || (r === 'problem' && k === 'problems') || (r === 'submission' && k === 'submissions') || (r === 'class' && k === 'classes') ? 'on' : ''}">${t}</a>`).join('');
@@ -932,8 +934,11 @@ async function viewProblem(id) {
   const pendingLoad = sessionStorage.getItem('cj-load-code');
   sessionStorage.removeItem('cj-load-code');
   // 訪客時寫的程式，登入後接著用
-  const anonDraft = loggedIn() ? store.get(`cj-draft-pending-${p.id}`) || store.get(`cj-draft-guest-${p.id}`) : null;
+  // 但本班「禁止貼上」時不帶入（避免登出→訪客貼上→再登入的漏洞）
+  const noPasteCls = loggedIn() && !isTeacher() && !!(S.klass && S.klass.opts && S.klass.opts.noPaste);
+  let anonDraft = loggedIn() ? store.get(`cj-draft-pending-${p.id}`) || store.get(`cj-draft-guest-${p.id}`) : null;
   if (anonDraft) { store.del(`cj-draft-pending-${p.id}`); store.del(`cj-draft-guest-${p.id}`); }
+  if (noPasteCls) anonDraft = null;
   const initial = pendingLoad ?? anonDraft ?? store.get(draftKey) ?? p.template ?? TEMPLATE;
   const sameSeries = list.filter(x => x.series === p.series);
   const topic = DATA.topics[p.topic];
@@ -1534,6 +1539,7 @@ async function viewScoreboard() {
   const cfg = gradeCfg();
   app().innerHTML = `<div class="card"><div class="row"><h2 style="margin:0">成績總表</h2><span class="spacer"></span>
     <label class="small"><input type="checkbox" id="auto" checked> 每 20 秒自動更新</label>
+    <a class="btn" href="#/quizgrades" title="知識王的成績和解題成績分開計算">🎮 知識王成績</a>
     <button class="btn" id="csv">⬇ 下載 CSV（Excel）</button>
     <button class="btn" id="toSheet">寫入 Google Sheet</button></div>
     <div class="tabs cls-tabs" id="clsTabs" style="margin:12px 0 0">${teacherClasses().map(c => `<button data-c="${esc(c.id)}" class="${c.id === cid ? 'on' : ''}">${esc(c.name)}</button>`).join('')}</div>
