@@ -1501,6 +1501,15 @@
       app().innerHTML = `<div class="card po-intro"><div class="po-intro-owl">${OWL_SVG}</div><h2>📮 栗尾郵局：最後一封信</h2><p class="err">${esc(e.message)}</p><p class="muted">老師開放之後，按下面的按鈕重新整理。</p><button class="btn primary" id="poRe">↻ 重新整理</button></div>`;
       $('#poRe').onclick = router; return;
     }
+    if (me.waiting) {   // 老師排定的開放時間還沒到
+      const off = me.now - Date.now();
+      app().innerHTML = `<div class="card po-intro"><div class="po-intro-owl">${OWL_SVG}</div><h2>📮 栗尾郵局：最後一封信</h2>
+        <p style="font-size:18px">⏳ 將於 <b>${esc(me.openText)}</b>（台灣時間）開放，測驗時間 ${me.minutes} 分鐘。</p>
+        <p class="po-big" id="poWait" style="font-size:40px;margin:10px 0"></p><p class="muted">時間到會自動打開，不用重新整理。先把規則想一想吧，館長已經在等你了……</p></div>`;
+      const tick = () => { const l = me.openAt - (Date.now() + off); if (!$('#poWait')) return; if (l <= 0) { $('#poWait').textContent = '開放了！'; clearPageTimers(); setTimeout(router, 800 + Math.random() * 2500); return; } $('#poWait').textContent = fmtLeft(l); };
+      tick(); pageTimers.push(setInterval(tick, 1000));
+      return;
+    }
     const pen = Math.round(me.penalty * 100), left = me.deadline - me.now;
     app().innerHTML = `<div class="card po-intro"><div class="po-intro-owl">${OWL_SVG}</div>
       <h2>📮 栗尾郵局：最後一封信</h2>
@@ -1542,7 +1551,7 @@
       try { data = await apiGet('/api/post/board', { cid }); draw(); } catch (e) { $('#poBoard').innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
     }
     function draw() {
-      const d = data, cfg = d.cfg, now = d.now, run = cfg.round && !cfg.closed && now < d.deadline;
+      const d = data, cfg = d.cfg, now = d.now, sched = !!cfg.round && cfg.startAt > now, run = cfg.round && !cfg.closed && now < d.deadline && !sched;
       const adj = t => Math.round((floor + (100 - floor) * t / 100) * 10) / 10;
       const st = d.students;
       const stats = d.stages.map(s => { const xs = st.map(x => x.st && x.st.s[s.sid]).filter(Boolean); return { s, n: xs.length, pass: xs.filter(x => x.pass).length, avg: xs.length ? Math.round(xs.reduce((a, x) => a + (x.best || 0), 0) / xs.length * 10) / 10 : 0 }; });
@@ -1550,11 +1559,12 @@
       const cell = (x, s) => { const y = x.st && x.st.s[s.sid]; const sk = x.st && x.st.skip[s.sid]; if (!y) return `<td class="po-c ${sk ? 'skip' : ''}">${sk ? '⏭' : ''}</td>`;
         return `<td class="po-c ${y.pass ? 'ok' : y.closed ? 'bad' : 'mid'}" title="${y.sc.map((v, i) => `第${i + 1}次 原始${y.raw[i]} 實得${v}`).join('、')}">${y.best}${y.a > 1 ? '²' : ''}</td>`; };
       $('#poBoard').innerHTML = `<div class="card">
-        ${!cfg.round ? `<h3 style="margin-top:0">還沒開始</h3>` : `<h3 style="margin-top:0">${run ? `🔴 進行中・剩下 <span id="poTLeft">${fmtLeft(d.deadline - now)}</span>` : cfg.closed ? '⏹ 已收卷' : '⏰ 時間到'}　<span class="muted small">場次 ${esc(cfg.round)}・開始 ${fmtTime(cfg.startAt)}・首錯扣 ${Math.round(cfg.penalty * 100)}%</span></h3>`}
+        ${!cfg.round ? `<h3 style="margin-top:0">還沒開始</h3>` : sched ? `<h3 style="margin-top:0">⏳ 已排定：<b>${twFmt(cfg.startAt)}</b>（台灣時間）開放，共 ${cfg.minutes} 分鐘　<span class="muted small">首錯扣 ${Math.round(cfg.penalty * 100)}%・時間到之前學生進不去，會看到倒數</span></h3>` : `<h3 style="margin-top:0">${run ? `🔴 進行中・剩下 <span id="poTLeft">${fmtLeft(d.deadline - now)}</span>` : cfg.closed ? '⏹ 已收卷' : '⏰ 時間到'}　<span class="muted small">場次 ${esc(cfg.round)}・開始 ${fmtTime(cfg.startAt)}・首錯扣 ${Math.round(cfg.penalty * 100)}%</span></h3>`}
         <div class="row po-ctl">
-          ${run ? `<button class="btn" id="poExt">⏩ 全班加時</button><input type="number" id="poExtM" value="10" min="1" max="120" style="width:60px">分　<button class="btn danger" id="poClose">⏹ 收卷</button>`
+          ${sched ? `<button class="btn" id="poCancel">✖ 取消排定</button><button class="btn primary" id="poNow">▶ 改成現在就開始</button>` : run ? `<button class="btn" id="poExt">⏩ 全班加時</button><input type="number" id="poExtM" value="10" min="1" max="120" style="width:60px">分　<button class="btn danger" id="poClose">⏹ 收卷</button>`
             : `<label>時間 <input type="number" id="poMin" value="${cfg.minutes || 80}" min="5" max="240" style="width:64px"> 分</label>
                <label>首錯扣 <select id="poPen">${[0, 10, 20, 30].map(v => `<option value="${v / 100}" ${Math.round(cfg.penalty * 100) === v ? 'selected' : ''}>${v}%</option>`).join('')}</select></label>
+               <label>開放時間（台灣時間）<input type="datetime-local" id="poAt" value=""> <span class="muted small">空白＝現在</span></label>
                <button class="btn primary" id="poOpen">▶ ${cfg.round ? '重新開一場（舊成績保留在試算表）' : '開始測驗（開放學生進場並開始計時）'}</button>
                ${cfg.round ? `<button class="btn" id="poExt">⏩ 時間到了，全班再加</button><input type="number" id="poExtM" value="10" min="1" max="120" style="width:60px">分` : ''}`}
         </div>
@@ -1580,7 +1590,15 @@
           <tr id="poDet_${esc(x.email)}" hidden><td colspan="${d.stages.length + 8}"></td></tr>`).join('')}
         </tbody></table></div><p class="muted small">格子：綠＝全對、橘＝還有機會、紅＝兩次都沒過（取較高分）、⏭＝跳過；² ＝用了第 2 次機會。滑鼠移到格子上可看每次原始分與實得分。</p></div>` : ''}`;
       const B = $('#poBoard');
-      if ($('#poOpen')) $('#poOpen').onclick = () => { if (cfg.round && !confirm('重新開一場：所有學生從頭開始（舊的作答紀錄保留在試算表「郵局測驗」）。確定？')) return; manage({ action: 'open', minutes: +$('#poMin').value, penalty: +$('#poPen').value, force: true }, '已開始！學生可以進場了'); };
+      if ($('#poAt')) $('#poAt').oninput = () => { const at = twParse($('#poAt').value); $('#poOpen').textContent = at > Date.now() ? `⏰ 排定在 ${twFmt(at)}（台灣時間）開放` : '▶ ' + (cfg.round ? '重新開一場（舊成績保留在試算表）' : '開始測驗（開放學生進場並開始計時）'); };
+      if ($('#poOpen')) $('#poOpen').onclick = () => {
+        const at = twParse($('#poAt').value);
+        if ($('#poAt').value && at <= Date.now()) return toast('開放時間已經過了，請重新選（或清空＝現在開始）', 4000);
+        if (cfg.round && !confirm('重新開一場：所有學生從頭開始（舊的作答紀錄保留在試算表「郵局測驗」）。確定？')) return;
+        manage({ action: 'open', minutes: +$('#poMin').value, penalty: +$('#poPen').value, startAt: at || 0, force: true }, at ? `已排定：${twFmt(at)}（台灣時間）開放` : '已開始！學生可以進場了');
+      };
+      if ($('#poCancel')) $('#poCancel').onclick = () => { if (confirm('取消這次排定的開放？')) manage({ action: 'cancel' }, '已取消排定'); };
+      if ($('#poNow')) $('#poNow').onclick = () => { if (confirm('改成現在就開放並開始計時？')) manage({ action: 'open', minutes: cfg.minutes, penalty: cfg.penalty, force: true }, '已開始！學生可以進場了'); };
       if ($('#poClose')) $('#poClose').onclick = () => { if (confirm('現在收卷？還在作答的學生會立刻結束（已送出的成績都會保留）。')) manage({ action: 'close' }, '已收卷'); };
       if ($('#poExt')) $('#poExt').onclick = () => manage({ action: 'extendAll', minutes: +$('#poExtM').value }, '已加時');
       if ($('#poHintGo')) $('#poHintGo').onclick = () => { const t = $('#poHint').value.trim(); if (!t) return toast('請輸入提示內容'); manage({ action: 'hint', text: t }, '已廣播（學生 30 秒內會看到）'); };

@@ -115,7 +115,7 @@
   }
   function closeGame() {
     if (!G) return;
-    clearInterval(G.tick); clearInterval(G.lockPoll);
+    clearInterval(G.tick); clearInterval(G.lockPoll); clearInterval(G.endPoll);
     unbindLeave();
     if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
     root() && root().remove();
@@ -514,6 +514,19 @@
       G.rankTried = true;
       api('/api/escape/status', ctxBody()).then(r => { if (G && r.rank) { G.rank = r.rank; showEnd(); } }).catch(() => { });
     }
+    // 還沒逃出：老師可能會加時或讓你繼續，每 5 秒問一次
+    clearInterval(G.endPoll);
+    if (!done && !G.practice) G.endPoll = setInterval(() => {
+      api('/api/escape/status', ctxBody()).then(r => {
+        if (!G || !r.state || r.state.end) return;
+        clearInterval(G.endPoll);
+        G.state = r.state; G.cfg = r.cfg; G.offset = r.now - Date.now();
+        const card = $('.esc-lobby-card.end');
+        if (!card) return;
+        card.insertAdjacentHTML('afterbegin', `<div class="esc-rank">⏰ 老師讓你繼續作答了！<br><button class="esc-btn go" id="escResume" style="margin-top:8px">繼續作答 ▶</button></div>`);
+        $('#escResume').onclick = () => { G.finished = false; G.timeChecked = false; G.away = false; enterExam(true); };
+      }).catch(() => { });
+    }, 5000);
     unbindLeave();
     if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
   }
@@ -523,12 +536,16 @@
     if (isTeacher()) return viewEscapeTeacher();
     const cfg = (S.klass && S.klass.escape) || {};
     const parts = Object.keys(ED.parts).filter(p => cfg[p] && (cfg[p].open || cfg[p].practice) && ED.parts[p].rooms.length);
+    const wait = p => cfg[p].open && cfg[p].openAt > Date.now();
     app().innerHTML = `<div class="card"><h2 style="margin-top:0">🔐 C++ 校園密室逃脫</h2>
       ${parts.length ? '' : '<p class="muted">目前沒有開放的測驗。老師開放後，按右上角 🔄 就會出現。</p>'}
       <div class="esc-list">${parts.map(p => `<div class="esc-item"><div><b>${esc(ED.parts[p].name)}</b><div class="muted small">${esc(ED.parts[p].desc)}</div>
-        <div class="small" id="escSt${p}"></div></div><button class="btn primary" data-part="${p}">${cfg[p].open ? '進入測驗' : '🎮 練習模式'}</button></div>`).join('')}</div></div>`;
+        <div class="small" id="escSt${p}">${wait(p) ? `⏳ 將於 <b>${twFmt(cfg[p].openAt)}</b>（台灣時間）開放` : ''}</div></div><button class="btn primary" data-part="${p}" ${wait(p) && !cfg[p].practice ? 'disabled' : ''}>${wait(p) ? (cfg[p].practice ? '🎮 練習模式' : '⏳ 還沒開放') : cfg[p].open ? '進入測驗' : '🎮 練習模式'}</button></div>`).join('')}</div></div>`;
+    // 排定的時間到了就重新顯示（不用學生自己重新整理）
+    const next = parts.filter(wait).map(p => cfg[p].openAt).sort((a, b) => a - b)[0];
+    if (next) pageTimers.push(setInterval(() => { if (Date.now() >= next) { clearPageTimers(); setTimeout(router, Math.random() * 2500); } }, 1000));
     $$('[data-part]').forEach(b => b.onclick = () => openGame(b.dataset.part).catch(e => toast(e.message)));
-    for (const p of parts) if (cfg[p].open) api('/api/escape/status', { part: p, cid: S.cid }).then(r => {
+    for (const p of parts) if (cfg[p].open && !wait(p)) api('/api/escape/status', { part: p, cid: S.cid }).then(r => {
       const st = r.state, el = $('#escSt' + p); if (!el) return;
       el.textContent = !st || !st.start ? '尚未開始' : st.end ? `已結束：破解 ${Object.keys(st.solved || {}).length} 間${r.rank ? `，🏅 全班第 ${r.rank.rank} 名逃出（共 ${r.rank.done} 人逃出）` : ''}` : `作答中：已破解 ${Object.keys(st.solved || {}).length} 間`;
     }).catch(() => { });
@@ -544,12 +561,18 @@
         <button class="btn" id="escTry">🎮 試玩（練習模式）</button></div>
       <div id="escCfg" class="esc-cfg"></div></div>
       <div class="card"><div class="row"><h3 style="margin:0">即時狀況</h3><span class="muted small" id="escUpd"></span><span class="spacer"></span>
+        <span class="small">⏰ 全班加時 <input type="number" id="escAddMin" min="1" max="120" value="10" style="width:52px"> 分鐘</span><button class="btn sm primary" id="escAddAll">加時</button>
         <label class="small"><input type="checkbox" id="escLogT"> 📜 顯示事件紀錄</label><button class="btn sm" id="escCsv">⬇ 下載 CSV</button></div>
         <div id="escBoard"><div class="loading">載入中…</div></div><div id="escLog"></div></div>`;
     $('#escTry').onclick = () => { store.set('cj-esc-part', part); openGame(part).catch(e => toast(e.message)); };
     $('#escCls').onchange = e => { cid = e.target.value; store.set('cj-tcid', cid); data = null; load(); };
     $('#escPart').onchange = e => { part = e.target.value; store.set('cj-esc-part', part); data = null; load(); };
     $('#escLogT').onchange = e => { showLog = e.target.checked; load(); };
+    $('#escAddAll').onclick = async () => {
+      const min = Math.max(1, Math.min(120, +$('#escAddMin').value || 10));
+      if (!confirm(`讓還沒逃出的同學再多 ${min} 分鐘？\n（作答中的：剩下的時間 + ${min} 分鐘；時間到的：從現在起 ${min} 分鐘）\n已逃出、離開畫面太多次、被老師結束的不會改變（那些可以個別按「繼續」）。`)) return;
+      try { const r = await api('/api/escape/manage', { cid, part, action: 'extendAll', minutes: min }); toast(`已經幫 ${r.count} 位同學加時 ${r.minutes} 分鐘`); load(); } catch (e) { toast(e.message); }
+    };
     $('#escCsv').onclick = async () => {
       const d = await apiGet('/api/escape/board', { cid, part, log: 1 });
       const rooms = d.rooms;
@@ -572,6 +595,7 @@
       $('#escCfg').innerHTML = `<div class="esc-cfg-grid">
         <label class="big"><input type="checkbox" data-c="open" ${c.open ? 'checked' : ''}> <b>開放正式測驗</b></label>
         <label class="big"><input type="checkbox" data-c="practice" ${c.practice ? 'checked' : ''}> <b>開放練習模式</b>（不計分，測驗結束後再開）</label>
+        <label>⏰ 開放時間（台灣時間）<input type="datetime-local" data-c="openAt" value="${twInput(c.openAt)}"> <span class="muted small">空白＝勾了就立刻開放</span></label>
         <label>時間 <input type="number" data-c="minutes" min="5" max="180" value="${c.minutes}" style="width:64px"> 分鐘</label>
         <label><input type="checkbox" data-c="lock" ${c.lock ? 'checked' : ''}> 🖥 鎖畫面（全螢幕；離開會鎖住）</label>
         <label>離開後：<select data-c="unlockBy" ${c.lock ? '' : 'disabled'}><option value="self" ${c.unlockBy === 'self' ? 'selected' : ''}>學生自己按「回到測驗」</option><option value="teacher" ${c.unlockBy === 'teacher' ? 'selected' : ''}>要老師解鎖</option></select></label>
@@ -582,11 +606,13 @@
         const cls = teacherClasses().find(x => x.id === cid) || {};
         const all = Object.assign({}, cls.escape || {});
         const g = k => $(`[data-c="${k}"]`);
-        all[part] = { open: g('open').checked, practice: g('practice').checked, lock: g('lock').checked, unlockBy: g('unlockBy').value, endAfter: +g('endAfter').value || 0, minutes: +g('minutes').value || 45 };
+        const at = twParse(g('openAt').value);
+        if (g('openAt').value && at <= Date.now() && g('open').checked && !(c.openAt && at === c.openAt)) { toast('開放時間已經過了，請重新選（或清空＝立刻開放）', 4000); return; }
+        all[part] = { openAt: at || 0, open: g('open').checked, practice: g('practice').checked, lock: g('lock').checked, unlockBy: g('unlockBy').value, endAfter: +g('endAfter').value || 0, minutes: +g('minutes').value || 45 };
         try {
           const r = await api('/api/class/update', { cid, escape: all });
           const k = S.classes.findIndex(x => x.id === cid); if (k >= 0) S.classes[k] = r.cls; saveState();
-          toast(all[part].open ? '已開放測驗，學生按 🔄 或重新整理就會看到' : '已儲存'); data = null; load();
+          toast(all[part].open ? (at > Date.now() ? `已排定：${twFmt(at)}（台灣時間）開放` : '已開放測驗，學生按 🔄 或重新整理就會看到') : '已儲存'); data = null; load();
         } catch (e) { toast(e.message); }
       };
     };

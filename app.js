@@ -68,6 +68,11 @@ function fmtTime(ts, short) {
   if (short && today) return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+// 台灣時間（UTC+8）：不管電腦設定哪個時區都一樣
+const TW = 8 * 3600000;
+const twParse = s => { const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) - TW : 0; };   // datetime-local 的值 → 時間戳
+const twInput = ts => ts ? new Date(ts + TW).toISOString().slice(0, 16) : '';                                                                           // 時間戳 → datetime-local 的值
+const twFmt = ts => { const d = new Date(ts + TW), p = n => String(n).padStart(2, '0'); return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`; };
 const VERDICT = { AC: '通過', WA: '答案錯誤', TLE: '執行超時', RE: '執行錯誤', CE: '編譯錯誤', OLE: '輸出過多', VOID: '老師作廢' };
 const vBadge = v => `<span class="v ${esc(v)}" title="${esc(VERDICT[v] || v)}">${esc(v)}</span>`;
 const stars = n => `<span class="stars">${'★'.repeat(n)}${'☆'.repeat(Math.max(0, 3 - n))}</span>`;
